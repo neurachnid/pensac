@@ -55,8 +55,8 @@ class PendulumPhysics {
         this.wasmInstance.reset();
         this.state = this.wasmInstance.get_state_js();
         this.currentStep = 0;
-        return this.getStateArray();
         this.lastTerminationReason = 'N/A';
+        return this.getStateArray();
     }
 
     getStateArray() {
@@ -183,15 +183,21 @@ class PendulumPhysics {
         this.effectiveRewardWeights.dx = this.baseRewardWeights.dx;
         this.effectiveRewardWeights.effort = this.baseRewardWeights.effort;
         this.effectiveRewardWeights.stable = this.baseRewardWeights.stable;
-        this.effectiveRewardWeights.swing = this.baseRewardWeights.swing;
+
+        // Dynamically scale swing assistance: taper off once both pendulums are nearly upright
+        let swingWeight = this.baseRewardWeights.swing;
+        if (cos_a1 < -0.8 && cos_a2 < -0.8) {
+            swingWeight *= 0.2; // reduce swing assistance near upright
+        }
+        this.effectiveRewardWeights.swing = swingWeight;
 
         // === 3.5 Swing-up assistance reward ===
         // Reward for actions that contribute to swinging the pendulums up
         // action is normalized [-1, 1]. a1_v, a2_v are angular velocities.
         // cos(a1) > 0.1 means pendulum 1 is in the lower half (a1=0 is down)
         let swing_assist_reward = 0;
-        if (cos_a1 > 0.1) { swing_assist_reward += this.baseRewardWeights.swing * action * a1_v * cos_a1; }
-        if (cos_a2 > 0.1) { swing_assist_reward += this.baseRewardWeights.swing * action * a2_v * cos_a2; }
+        if (cos_a1 > 0.1) { swing_assist_reward += swingWeight * action * a1_v * cos_a1; }
+        if (cos_a2 > 0.1) { swing_assist_reward += swingWeight * action * a2_v * cos_a2; }
 
 
         // === 4. Compose reward ===
@@ -260,6 +266,11 @@ class SACAgent {
         this.batchSize = 128; // Reduced from 256 for more frequent updates
         this.bufferSize = 100000;
         this.warmupSteps = 5000; // Increased for more initial random exploration
+
+        // Range for policy log standard deviation and penalty weight
+        this.logStdMin = -2.0;
+        this.logStdMax = 0.5;
+        this.logStdPenalty = 0.01;
 
         // Automatic entropy tuning
         this.alphaLr = 0.0003;
@@ -339,9 +350,10 @@ class SACAgent {
         }).apply(x);
         
         const logStdOutput = tf.layers.dense({
-            units: this.actionSize, 
+            units: this.actionSize,
             activation: 'tanh', // Changed to tanh
             kernelInitializer: 'truncatedNormal',
+            biasInitializer: 'zeros',
             name: 'policy_log_std'
         }).apply(x);
         
@@ -466,9 +478,8 @@ class SACAgent {
                 
                 // logStd is now the direct output of a tanh layer, in [-1, 1]
                 // Scale it to a more appropriate range for log_std, e.g., [-5, 2]
-                const LOG_STD_MAX = 2.0;
-                const LOG_STD_MIN = -5.0; // Tighter range
-                // scaledLogStd = logStd_from_actor_tanh * 3.5 - 1.5
+                const LOG_STD_MAX = this.logStdMax;
+                const LOG_STD_MIN = this.logStdMin;
                 const scaledLogStd = logStd.mul(0.5 * (LOG_STD_MAX - LOG_STD_MIN)).add(0.5 * (LOG_STD_MAX + LOG_STD_MIN));
 
                 const clippedLogStd = tf.clipByValue(scaledLogStd, LOG_STD_MIN, LOG_STD_MAX);
@@ -513,15 +524,16 @@ class SACAgent {
                 
                 // Final validation and clipping of log probabilities
                 const clippedLogProb = tf.clipByValue(logProb, -50, 50);
-                
-                return {action, logProb: clippedLogProb};
+
+                return {action, logProb: clippedLogProb, clippedLogStd};
                 
             } catch (error) {
                 console.error('Error in sampleAction:', error);
                 // Return safe fallback values
                 const fallbackAction = tf.randomUniform(mean.shape, -1, 1);
                 const fallbackLogProb = tf.fill([mean.shape[0], 1], -1.0);
-                return {action: fallbackAction, logProb: fallbackLogProb};
+                const fallbackLogStd = tf.fill([mean.shape[0], 1], 0.0);
+                return {action: fallbackAction, logProb: fallbackLogProb, clippedLogStd: fallbackLogStd};
             }
         });
     }
@@ -725,7 +737,7 @@ class SACAgent {
 
         const grads = tf.variableGrads(() => {
             const [means, logStds] = this.actor.apply(states);
-            const {action: newActions, logProb: logProbs} = this.sampleAction(means, logStds); // logProbs is used here
+            const {action: newActions, logProb: logProbs, clippedLogStd} = this.sampleAction(means, logStds); // logProbs is used here
             
             const q1 = this.critic1.apply([states, newActions]);
             const q2 = this.critic2.apply([states, newActions]);
@@ -733,7 +745,11 @@ class SACAgent {
 
             // SAC actor loss: maximize Q - alpha * entropy
             const entropyTerm = tf.mul(this.alpha, logProbs);
-            const currentLoss = tf.mean(entropyTerm.sub(minQ));
+            let currentLoss = tf.mean(entropyTerm.sub(minQ));
+            if (this.logStdPenalty > 0) {
+                const penalty = tf.mean(tf.square(clippedLogStd));
+                currentLoss = currentLoss.add(penalty.mul(this.logStdPenalty));
+            }
 
             // lossTensor and avgLogProbTensor were assigned here.
             // currentLoss is the return value, so it will be grads.value.
