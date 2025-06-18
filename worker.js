@@ -27,6 +27,8 @@ async function configureTensorFlowJS() {
 // Call configuration immediately
 configureTensorFlowJS();
 
+const TRACK_HALF_LENGTH = 2.4; // meters
+
 // --- Environment Physics (moved to worker) ---
 class PendulumPhysics {
     constructor() {
@@ -113,7 +115,7 @@ class PendulumPhysics {
             // Episode ends if physics unstable, cart off track, or max steps reached.
             if (!physics_ok) {
                 done = true; this.lastTerminationReason = 'Physics Unstable';
-            } else if (Math.abs(this.state.cart_x_m) > 2.4) {
+            } else if (Math.abs(this.state.cart_x_m) > TRACK_HALF_LENGTH) {
                 done = true; this.lastTerminationReason = 'Cart Out of Bounds';
             } else if (this.currentStep >= this.maxSteps) {
                 done = true; this.lastTerminationReason = 'Max Episode Steps Reached';
@@ -142,7 +144,7 @@ class PendulumPhysics {
 
         let reward = -w0 * pen;
 
-        const outOfBounds = Math.abs(cart_x_m) > 2.4 ? 1 : 0;
+        const outOfBounds = Math.abs(cart_x_m) > TRACK_HALF_LENGTH ? 1 : 0;
         reward -= Vp * outOfBounds;
 
         this.lastRewardComponents = {
