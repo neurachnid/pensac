@@ -30,34 +30,33 @@ configureTensorFlowJS();
 // --- Environment Physics (moved to worker) ---
 class PendulumPhysics {
     constructor() {
-        // Default parameters, Wasm will use these to initialize
-        // Parameters aligned with the reference paper
+        // Physical parameters from the reference paper
         const p = {
             cart_m: 0.350,
             m1: 0.133,
             m2: 0.025,
             l1_m: 0.5,
             l2_m: 0.5,
-            g: 9.81
+            g: 9.81,
+            b0: 0.05,
+            b1: 0.001,
+            b2: 0.001
         };
-        // For --target no-modules, WasmPendulumPhysics becomes a global constructor.
-        // self.WasmPendulumPhysics or just WasmPendulumPhysics should work.
+        // Initialize the WebAssembly physics engine (no damping parameters supported)
         this.wasmInstance = new wasm_bindgen.WasmPendulumPhysics(p.cart_m, p.m1, p.m2, p.l1_m, p.l2_m, p.g);
-        this.params = this.wasmInstance.get_params_js(); // Get params from Wasm
-        this.state = this.wasmInstance.get_state_js();   // Get initial state from Wasm
-        // The paper applies forces in the range [-15, 15] N
+        this.params = p; // Store parameters locally for JS-side damping
+        this.state = this.wasmInstance.get_state_js();
+        // Force range
         this.actionMax = 15.0;
         this.maxSteps = 1000;
         this.currentStep = 0;
-        // Base reward weights (initial values)
-        // dx: Increased significantly to penalize going off-track.
-        // dx: Further increased, swing: further reduced to strongly prioritize cart control.
-        this.baseRewardWeights = { H: 10, dx: 40.0, effort: 0.01, vel: 0.002, stable: 2.0, swing: 5.0 };
+        this.prevAction = 0;
 
-        // Effective reward weights, updated in calculateReward
-        this.effectiveRewardWeights = JSON.parse(JSON.stringify(this.baseRewardWeights));
-        this.lastRewardComponents = {}; // To store breakdown of reward
-        this.lastTerminationReason = 'N/A'; // To store why an episode ended
+        // Reward coefficients from the paper
+        this.rewardWeights = { w0: 0.1, w1: 5, w2: 5, w3: 1, w4: 0.05, Vp: 100 };
+
+        this.lastRewardComponents = {};
+        this.lastTerminationReason = 'N/A';
     }
 
     reset() {
@@ -73,8 +72,8 @@ class PendulumPhysics {
         return [s.cart_x_m, s.cart_x_v_m, Math.cos(s.a1), Math.sin(s.a1), s.a1_v, Math.cos(s.a2), Math.sin(s.a2), s.a2_v];
     }
 
-    getEffectiveRewardWeights() {
-        return this.effectiveRewardWeights;
+    getRewardWeights() {
+        return this.rewardWeights;
     }
 
     getRewardComponents() {
@@ -93,6 +92,10 @@ class PendulumPhysics {
         const dt = 1/60;
         const physics_ok = this.wasmInstance.update_physics_step(dt, action, currentSimulationMode === 'OBSERVING');
         this.state = this.wasmInstance.get_state_js(); // Update JS state from Wasm
+        // Simple damping applied after the physics step
+        this.state.cart_x_v_m -= this.params.b0 * this.state.cart_x_v_m * dt;
+        this.state.a1_v       -= this.params.b1 * this.state.a1_v * dt;
+        this.state.a2_v       -= this.params.b2 * this.state.a2_v * dt;
 
         this.currentStep++;
         const next_state = this.getStateArray();
@@ -122,113 +125,37 @@ class PendulumPhysics {
     }
 
     calculateReward(action) {
-        const { a1, a2, a1_v, a2_v, cart_x_m } = this.state;
-        const { l1_m, l2_m } = this.params;
+        const { a1, a2, cart_x_m } = this.state;
+        const { w0, w1, w2, w3, w4, Vp } = this.rewardWeights;
 
-        // === 0. Sanity-check ===
-        const varsToCheck = [a1, a2, a1_v, a2_v, cart_x_m, action];
-        if (varsToCheck.some(v => !isFinite(v) || isNaN(v))) {
-            console.warn('NaN/Inf in reward inputs', varsToCheck);
-            return -10; // harsh penalty for invalid state
+        const theta1Err = a1 - Math.PI;
+        const theta2Err = a2 - Math.PI;
+
+        if ([a1, a2, cart_x_m, action].some(v => !isFinite(v) || isNaN(v))) {
+            return -10;
         }
 
-        // === 1. Keep a global step counter so we can anneal shaping terms ===
-        if (typeof PendulumPhysics.totalSteps === 'undefined') {
-            PendulumPhysics.totalSteps = 0;
-        }
-        const globalStep = PendulumPhysics.totalSteps;
+        const pen = w1 * theta1Err * theta1Err +
+                     w2 * theta2Err * theta2Err +
+                     w3 * cart_x_m * cart_x_m +
+                     w4 * (this.prevAction * this.prevAction);
 
-        // === 2. Core features ===
-        const cos_a1 = Math.cos(a1);
-        const cos_a2 = Math.cos(a2);
+        let reward = -w0 * pen;
 
-        // 2.1  Height of pole-2 tip (normalised 0→2).
-        //      Upright → high reward; hanging ↓ low reward.
-        const heightTip2 =
-            (l1_m * (1 - cos_a1) + l2_m * (1 - cos_a2)) / (l1_m + l2_m); // 0→2
-
-        // 2.2  Cart displacement (centre of rail at 0).
-        // Termination occurs if |cart_x_m| > 2.4
-        const TRACK_HALF = 2.4;
-        const cartPenalty = (cart_x_m / TRACK_HALF) ** 2; // Quadratic penalty: 0 @ centre, 1 @ rail end
-
-        // 2.3  Effort penalty – square of commanded force, scaled to [0,1].
-        const effort = (action / this.actionMax) ** 2; // ∈ [0,1]
-
-        // 2.4  Residual wobble (angular velocity).
-        const velPenalty = (a1_v * a1_v + a2_v * a2_v);
-
-        // 2.5  Stability bonus (tiny but crisp signal once balanced).
-        const STABLE_ANGLE = 12 * Math.PI / 180; // 12°
-        const STABLE_CART  = 0.2; // m
-        const isStable =
-            (Math.abs(a1 - Math.PI) < STABLE_ANGLE) &&
-            (Math.abs(a2 - Math.PI) < STABLE_ANGLE) &&
-            (Math.abs(cart_x_m)    < STABLE_CART) ? 1 : 0;
-
-        // === 3. Coefficients w/ annealing for height shaping ===
-        // Calculate annealed weights for this step based on baseRewardWeights
-        let currentH = this.baseRewardWeights.H;
-        const ANNEAL_START   = 500000; // Start annealing H much later
-        const ANNEAL_PERIOD  = 100000; // Anneal H over a longer period
-        const DECAY          = 0.95;   // Slower decay rate for H
-
-        // Anneal height shaping every ANNEAL_PERIOD env steps (min 1).
-        if (globalStep > ANNEAL_START) {
-            const numAnnealingPeriods = Math.floor((globalStep - ANNEAL_START) / ANNEAL_PERIOD);
-            currentH = this.baseRewardWeights.H * Math.pow(DECAY, numAnnealingPeriods);
-            currentH = Math.max(1.0, currentH); // Ensure H doesn't go too low
-        }
-
-        let currentVelWeight = this.baseRewardWeights.vel; // Base velocity damping
-        // Increase velocity damping if pendulums are mostly upright
-        if (cos_a1 < -0.8 || cos_a2 < -0.8) { // cos(angle) is negative when up
-            currentVelWeight += 0.05; 
-        }
-
-        // Update effectiveRewardWeights for logging/external access
-        this.effectiveRewardWeights.H = currentH;
-        this.effectiveRewardWeights.vel = currentVelWeight;
-        this.effectiveRewardWeights.dx = this.baseRewardWeights.dx;
-        this.effectiveRewardWeights.effort = this.baseRewardWeights.effort;
-        this.effectiveRewardWeights.stable = this.baseRewardWeights.stable;
-
-        // Dynamically scale swing assistance: taper off once both pendulums are nearly upright
-        let swingWeight = this.baseRewardWeights.swing;
-        if (cos_a1 < -0.8 && cos_a2 < -0.8) {
-            swingWeight *= 0.2; // reduce swing assistance near upright
-        }
-        this.effectiveRewardWeights.swing = swingWeight;
-
-        // === 3.5 Swing-up assistance reward ===
-        // Reward for actions that contribute to swinging the pendulums up
-        // action is normalized [-1, 1]. a1_v, a2_v are angular velocities.
-        // cos(a1) > 0.1 means pendulum 1 is in the lower half (a1=0 is down)
-        let swing_assist_reward = 0;
-        if (cos_a1 > 0.1) { swing_assist_reward += swingWeight * action * a1_v * cos_a1; }
-        if (cos_a2 > 0.1) { swing_assist_reward += swingWeight * action * a2_v * cos_a2; }
-
-
-        // === 4. Compose reward ===
-        const rH = this.effectiveRewardWeights.H * heightTip2;
-        const rDx = -this.effectiveRewardWeights.dx * cartPenalty;
-        const rEffort = -this.effectiveRewardWeights.effort * effort;
-        const rVel = -this.effectiveRewardWeights.vel * velPenalty;
-        const rStable = this.effectiveRewardWeights.stable * isStable;
-        // swing_assist_reward is already calculated with its weight
+        const outOfBounds = Math.abs(cart_x_m) > 2.4 ? 1 : 0;
+        reward -= Vp * outOfBounds;
 
         this.lastRewardComponents = {
-            rH, rDx, rEffort, rVel, rStable, rSwing: swing_assist_reward
+            theta1: -w0 * w1 * theta1Err * theta1Err,
+            theta2: -w0 * w2 * theta2Err * theta2Err,
+            cart:   -w0 * w3 * cart_x_m * cart_x_m,
+            effort: -w0 * w4 * (this.prevAction * this.prevAction),
+            outOfBounds: -Vp * outOfBounds
         };
 
-        let r = rH + rDx + rEffort + rVel + rStable + swing_assist_reward;
+        this.prevAction = action;
 
-
-
-
-        // Clip to keep numerical range tame.
-        r = Math.max(-50, Math.min(50, r));
-        return r;
+        return reward;
     }
 
     // updatePhysics method is now implicitly handled by Wasm.
@@ -638,7 +565,7 @@ function simulationStep() {
                 stateNormalizationMean: agent.stateRunningMean.map(v => parseFloat(v.toFixed(4))),
                 stateNormalizationVar: agent.stateRunningVar.map(v => parseFloat(v.toFixed(4)))
             },
-            physicsRewardConfig: physics.getEffectiveRewardWeights(),
+            rewardWeights: physics.getRewardWeights(),
             currentSpeed: currentSimStepsPerFrame
         });
         
