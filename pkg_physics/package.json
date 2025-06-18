@@ -1,0 +1,11 @@
+{
+  "name": "physics_engine",
+  "version": "0.1.0",
+  "files": [
+    "physics_engine_bg.wasm",
+    "physics_engine.js",
+    "physics_engine.d.ts"
+  ],
+  "browser": "physics_engine.js",
+  "types": "physics_engine.d.ts"
+}

@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAC Double Pendulum Control - TensorFlow.js</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="flex flex-col items-center justify-center min-h-screen p-4">
+
+    <div class="text-center mb-6">
+        <h1 class="text-4xl font-bold text-white mb-2">SAC Double Pendulum Control</h1>
+        <p class="text-lg text-gray-400">A robust Soft Actor-Critic agent learning to swing-up and balance a double pendulum using TensorFlow.js.</p>
+    </div>
+    
+    <!-- Statistics Display -->
+    <div class="grid grid-cols-1 md:grid-cols-5 gap-4 w-full max-w-6xl mb-4">
+      <div class="stat-card">
+          <p class="text-sm text-gray-400">Episode</p>
+          <p id="episode-counter" class="text-2xl font-bold text-white">0</p>
+      </div>
+      <div class="stat-card">
+          <p class="text-sm text-gray-400">Learning Mode</p>
+          <p id="learning-mode" class="text-lg font-bold text-purple-400">SAC</p>
+      </div>
+      <div class="stat-card">
+          <p class="text-sm text-gray-400">Current Reward</p>
+          <p id="total-reward" class="text-2xl font-bold text-white">0</p>
+      </div>
+      <div class="stat-card">
+          <p class="text-sm text-gray-400">Best Reward</p>
+          <p id="best-reward" class="text-2xl font-bold text-yellow-400">0</p>
+      </div>
+      <div class="stat-card">
+          <p class="text-sm text-gray-400">Buffer Size</p>
+          <p id="buffer-size" class="text-lg font-bold text-green-400">0</p>
+      </div>
+    </div>
+
+    <!-- Training Progress Display -->
+    <div class="w-full max-w-6xl mb-4">
+        <div class="stat-card">
+            <p class="text-sm text-gray-400 mb-2">SAC Agent Training Progress</p>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-300">
+                <div>
+                    <p>🎯 <strong>Goal:</strong> Swing up both pendulums and maintain balance</p>
+                    <p>🤖 <strong>Algorithm:</strong> Soft Actor-Critic (SAC) with twin Q-networks</p>
+                    <p>📈 <strong>Avg Reward (last 10):</strong> <span id="avg-reward" class="text-green-400 font-bold">0.0</span></p>
+                </div>
+                <div>
+                    <p>⚡ <strong>Training Status:</strong> <span id="training-status" class="text-blue-400 font-bold">Warming up...</span></p>
+                    <p>🔢 <strong>Total Steps:</strong> <span id="total-steps" class="text-cyan-400 font-bold">0</span></p>
+                    <p>💾 <strong>Experience Buffer:</strong> <span id="buffer-progress" class="text-orange-400 font-bold">0/100K</span></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Simulation Canvases -->
+    <div id="simulation-container" class="w-full" style="max-width: 800px;">
+        <canvas id="traceCanvas" class="w-full block"></canvas>
+        <canvas id="pendulumCanvas" class="w-full"></canvas>
+    </div>
+    
+    <!-- Controls -->
+    <div class="w-full max-w-4xl mt-6 space-y-4" style="position: relative; z-index: 10;">
+      <div class="grid grid-cols-2 gap-4">
+        <button id="trainButton" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg text-lg transition-colors duration-200 col-span-2">Start Training</button>        
+        <button id="pauseResumeButton" class="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-4 rounded-lg text-md disabled:opacity-50" disabled>Reset Pendulum Position</button>
+        <button id="resetButton" class="w-full bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-2 px-4 rounded-lg text-md">Reset Agent</button>        
+        <button id="renderButton" class="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg text-md">Pause Visuals</button>
+        <button id="saveStateButton" class="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-lg text-md disabled:opacity-50" disabled>Save State</button>
+        <button id="loadStateButton" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg text-md disabled:opacity-50 col-span-2" disabled>Load State</button>
+      </div>
+      <div class="flex items-center space-x-2">
+          <label for="speedSlider" class="text-sm font-medium text-gray-400">Training Speed:</label>
+          <input id="speedSlider" type="range" min="1" max="500" value="1" class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer">
+          <span id="speedValue" class="text-sm font-bold text-white w-12 text-center">x1</span>
+      </div>
+      <div class="bg-gray-800 p-3 rounded-lg">
+        <p class="text-sm text-gray-400 mb-2">Training Status:</p>
+        <div class="grid grid-cols-2 gap-2 text-xs">
+          <div>
+            <span class="text-gray-500">Mode:</span> 
+            <span id="currentMode" class="text-blue-400 font-bold">Stopped</span>
+          </div>
+          <div>
+            <span class="text-gray-500">Agent State:</span> 
+            <span id="agentState" class="text-green-400 font-bold">Ready</span>
+          </div>
+          <div>
+            <span class="text-gray-500">Sim Speed (Actual):</span> 
+            <span id="sps-display" class="text-teal-400 font-bold">-</span>
+          </div>
+          <div>
+            <span class="text-gray-500">Last Action:</span> 
+            <span id="lastAction" class="text-yellow-400 font-bold">0.00</span>
+          </div>
+          <div>
+            <span class="text-gray-500">Memory Usage:</span> 
+            <span id="memoryUsage" class="text-purple-400 font-bold">-</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Reward Chart -->
+    <div class="w-full max-w-4xl mt-6 bg-gray-800 p-4 rounded-lg">
+      <canvas id="rewardChart"></canvas>
+    </div>
+
+    <!-- Loss Chart -->
+    <div class="w-full max-w-4xl mt-6 bg-gray-800 p-4 rounded-lg">
+      <canvas id="lossChart"></canvas>
+    </div>
+
+    <!-- Debug Info -->
+    <div class="bg-gray-800 p-4 rounded-lg shadow mt-6">
+      <div class="flex justify-between items-center mb-2">
+          <h3 class="text-lg font-semibold text-gray-200">Agent & Simulation Snapshot</h3>
+          <button id="copyDebugInfoButton" class="bg-indigo-500 hover:bg-indigo-600 text-white font-semibold py-1 px-3 rounded text-xs transition-colors">
+              Copy Info
+          </button>
+      </div>
+      <pre id="debugInfoPanel" class="text-xs text-gray-300 whitespace-pre-wrap break-all bg-gray-900 p-3 rounded max-h-80 overflow-y-auto"></pre>
+  </div>
+
+    <script src="main.js" defer></script>
+</body>
+</html>

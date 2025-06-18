@@ -1,0 +1,37 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_physicsparams_free: (a: number, b: number) => void;
+export const __wbg_get_physicsparams_cart_m: (a: number) => number;
+export const __wbg_set_physicsparams_cart_m: (a: number, b: number) => void;
+export const __wbg_get_physicsparams_m1: (a: number) => number;
+export const __wbg_set_physicsparams_m1: (a: number, b: number) => void;
+export const __wbg_get_physicsparams_m2: (a: number) => number;
+export const __wbg_set_physicsparams_m2: (a: number, b: number) => void;
+export const __wbg_get_physicsparams_l1_m: (a: number) => number;
+export const __wbg_set_physicsparams_l1_m: (a: number, b: number) => void;
+export const __wbg_get_physicsparams_l2_m: (a: number) => number;
+export const __wbg_set_physicsparams_l2_m: (a: number, b: number) => void;
+export const __wbg_get_physicsparams_g: (a: number) => number;
+export const __wbg_set_physicsparams_g: (a: number, b: number) => void;
+export const __wbg_physicsstate_free: (a: number, b: number) => void;
+export const __wbg_wasmpendulumphysics_free: (a: number, b: number) => void;
+export const wasmpendulumphysics_new: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+export const wasmpendulumphysics_reset: (a: number) => void;
+export const wasmpendulumphysics_get_state_js: (a: number) => any;
+export const wasmpendulumphysics_get_params_js: (a: number) => any;
+export const wasmpendulumphysics_update_physics_step: (a: number, b: number, c: number, d: number) => number;
+export const __wbg_set_physicsstate_a1: (a: number, b: number) => void;
+export const __wbg_set_physicsstate_a2: (a: number, b: number) => void;
+export const __wbg_set_physicsstate_a1_v: (a: number, b: number) => void;
+export const __wbg_set_physicsstate_a2_v: (a: number, b: number) => void;
+export const __wbg_set_physicsstate_cart_x_m: (a: number, b: number) => void;
+export const __wbg_set_physicsstate_cart_x_v_m: (a: number, b: number) => void;
+export const __wbg_get_physicsstate_a1: (a: number) => number;
+export const __wbg_get_physicsstate_a2: (a: number) => number;
+export const __wbg_get_physicsstate_a1_v: (a: number) => number;
+export const __wbg_get_physicsstate_a2_v: (a: number) => number;
+export const __wbg_get_physicsstate_cart_x_m: (a: number) => number;
+export const __wbg_get_physicsstate_cart_x_v_m: (a: number) => number;
+export const __wbindgen_export_0: WebAssembly.Table;
+export const __wbindgen_start: () => void;
