@@ -7,7 +7,15 @@ class PendulumRenderer {
         this.p_ctx = this.pendulumCanvas.getContext('2d');
         this.traceCanvas = document.getElementById('traceCanvas');
         this.t_ctx = this.traceCanvas.getContext('2d');
-        this.params = { cart_m: 1.0, m1: 0.1, m2: 0.1, l1_m: 1.0, l2_m: 1.0, g: 9.8 }; // Default params
+        // Physical parameters from the referenced DDPG paper
+        this.params = {
+            cart_m: 0.350,
+            m1: 0.133,
+            m2: 0.025,
+            l1_m: 0.5,
+            l2_m: 0.5,
+            g: 9.81
+        };
         this.state = null; // This will be updated from worker
         this.camera_x_m = 0;
 
@@ -138,7 +146,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const { 
                     totalReward, episode, bestReward, avgReward, 
                     totalSteps, bufferSize, mode,
-                    // Removed trainingLosses, agentConfig, physicsRewardConfig from payload destructuring
+                    // Removed trainingLosses, agentConfig, rewardWeights from payload destructuring
                     currentSpeed 
                 } = payload; // payload is e.data.payload
 
@@ -153,7 +161,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (e.data.policyDiagnostics) latestDebugSnapshot.policyDiagnostics = e.data.policyDiagnostics;
                 if (e.data.terminationReason) latestDebugSnapshot.terminationReason = e.data.terminationReason;
                 if (e.data.agentConfig) latestDebugSnapshot.agentConfig = e.data.agentConfig; 
-                if (e.data.physicsRewardConfig) latestDebugSnapshot.physicsRewardConfig = e.data.physicsRewardConfig; 
+                if (e.data.rewardWeights) latestDebugSnapshot.rewardWeights = e.data.rewardWeights;
 
                 // Update stats
                 document.getElementById('episode-counter').textContent = episode;
@@ -161,7 +169,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('best-reward').textContent = bestReward.toFixed(2);
                 document.getElementById('avg-reward').textContent = avgReward.toFixed(2);
                 
-                // Update SAC-specific info (only if in training mode for these stats)
+                // Update agent-specific info (only if in training mode for these stats)
                 if (totalSteps !== undefined) {
                     document.getElementById('total-steps').textContent = totalSteps.toLocaleString();
                 }
@@ -440,16 +448,18 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (data.agentConfig) {
-            content += `\n--- SAC Agent Config ---\n`;
-            content += `Alpha (Entropy): ${data.agentConfig.alpha}\n`;
-            content += `Actor LR: ${data.agentConfig.actorLr}\n`;
-            content += `Critic LR: ${data.agentConfig.criticLr}\n`;
-            content += `Tau (Target Update): ${data.agentConfig.tau}\n`;
-            content += `Gamma (Discount): ${data.agentConfig.gamma}\n`;
-            content += `Batch Size: ${data.agentConfig.batchSize}\n`;
-            content += `Buffer: ${(data.bufferSize || 0).toLocaleString()} / ${data.agentConfig.bufferSize?.toLocaleString() || 'N/A'}\n`;
-            content += `Warmup Steps: ${data.agentConfig.warmupSteps}\n`;
-            content += `Train Freq (steps): ${data.agentConfig.trainFrequency}\n`;
+            content += `\n--- RL Agent Config ---\n`;
+            if (data.agentConfig.alpha !== undefined) {
+                content += `Alpha (Entropy): ${data.agentConfig.alpha}\n`;
+            }
+            if (data.agentConfig.actorLr !== undefined) content += `Actor LR: ${data.agentConfig.actorLr}\n`;
+            if (data.agentConfig.criticLr !== undefined) content += `Critic LR: ${data.agentConfig.criticLr}\n`;
+            if (data.agentConfig.tau !== undefined) content += `Tau (Target Update): ${data.agentConfig.tau}\n`;
+            if (data.agentConfig.gamma !== undefined) content += `Gamma (Discount): ${data.agentConfig.gamma}\n`;
+            if (data.agentConfig.batchSize !== undefined) content += `Batch Size: ${data.agentConfig.batchSize}\n`;
+            if (data.agentConfig.bufferSize !== undefined) content += `Buffer: ${(data.bufferSize || 0).toLocaleString()} / ${data.agentConfig.bufferSize?.toLocaleString() || 'N/A'}\n`;
+            if (data.agentConfig.warmupSteps !== undefined) content += `Warmup Steps: ${data.agentConfig.warmupSteps}\n`;
+            if (data.agentConfig.trainFrequency !== undefined) content += `Train Freq (steps): ${data.agentConfig.trainFrequency}\n`;
         }
 
         if (data.physicsParams) {
@@ -462,24 +472,23 @@ document.addEventListener('DOMContentLoaded', () => {
             content += `Pendulum 2 Length (l2): ${data.physicsParams.l2_m?.toFixed(2) || 'N/A'} m\n`;
         }
 
-        if (data.physicsRewardConfig) {
-            content += `\n--- Reward Shaping (Current Effective) ---\n`;
-            content += `Weight Height (w.H): ${data.physicsRewardConfig.H?.toFixed(3) || 'N/A'}\n`;
-            content += `Weight Pos (w.dx): ${data.physicsRewardConfig.dx?.toFixed(3) || 'N/A'}\n`;
-            content += `Weight Effort: ${data.physicsRewardConfig.effort?.toFixed(3) || 'N/A'}\n`;
-            content += `Weight Velocity (w.vel): ${data.physicsRewardConfig.vel?.toFixed(3) || 'N/A'}\n`;
-            content += `Weight Stable: ${data.physicsRewardConfig.stable?.toFixed(3) || 'N/A'}\n`;
-            content += `Weight Swing (w.swing): ${data.physicsRewardConfig.swing?.toFixed(3) || 'N/A'}\n`;
+        if (data.rewardWeights) {
+            content += `\n--- Reward Weights ---\n`;
+            content += `w0: ${data.rewardWeights.w0}\n`;
+            content += `w1: ${data.rewardWeights.w1}\n`;
+            content += `w2: ${data.rewardWeights.w2}\n`;
+            content += `w3: ${data.rewardWeights.w3}\n`;
+            content += `w4: ${data.rewardWeights.w4}\n`;
+            content += `V_p: ${data.rewardWeights.Vp}\n`;
         }
 
         if (data.lastStepRewardComponents) {
             content += `\n--- Last Step Reward Breakdown ---\n`;
-            content += `Height: ${data.lastStepRewardComponents.rH?.toFixed(3) || 'N/A'}\n`;
-            content += `Cart Pos: ${data.lastStepRewardComponents.rDx?.toFixed(3) || 'N/A'}\n`;
-            content += `Effort: ${data.lastStepRewardComponents.rEffort?.toFixed(3) || 'N/A'}\n`;
-            content += `Velocity: ${data.lastStepRewardComponents.rVel?.toFixed(3) || 'N/A'}\n`;
-            content += `Stability: ${data.lastStepRewardComponents.rStable?.toFixed(3) || 'N/A'}\n`;
-            content += `Swing Assist: ${data.lastStepRewardComponents.rSwing?.toFixed(3) || 'N/A'}\n`;
+            content += `Theta1 Term: ${data.lastStepRewardComponents.theta1?.toFixed(3) || 'N/A'}\n`;
+            content += `Theta2 Term: ${data.lastStepRewardComponents.theta2?.toFixed(3) || 'N/A'}\n`;
+            content += `Cart Term: ${data.lastStepRewardComponents.cart?.toFixed(3) || 'N/A'}\n`;
+            content += `Effort Term: ${data.lastStepRewardComponents.effort?.toFixed(3) || 'N/A'}\n`;
+            content += `OutOfBounds Penalty: ${data.lastStepRewardComponents.outOfBounds?.toFixed(3) || 'N/A'}\n`;
         }
 
         if (data.policyDiagnostics) {
@@ -725,7 +734,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('best-reward').textContent = '0.00';
         document.getElementById('avg-reward').textContent = '0.00';
         
-        // Reset SAC-specific UI elements
+        // Reset agent-specific UI elements
         document.getElementById('buffer-size').textContent = '0';
         document.getElementById('total-steps').textContent = '0';
         document.getElementById('buffer-progress').textContent = '0/100K';
