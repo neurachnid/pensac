@@ -7,7 +7,15 @@ class PendulumRenderer {
         this.p_ctx = this.pendulumCanvas.getContext('2d');
         this.traceCanvas = document.getElementById('traceCanvas');
         this.t_ctx = this.traceCanvas.getContext('2d');
-        this.params = { cart_m: 1.0, m1: 0.1, m2: 0.1, l1_m: 1.0, l2_m: 1.0, g: 9.8 }; // Default params
+        // Physical parameters from the referenced DDPG paper
+        this.params = {
+            cart_m: 0.350,
+            m1: 0.133,
+            m2: 0.025,
+            l1_m: 0.5,
+            l2_m: 0.5,
+            g: 9.81
+        };
         this.state = null; // This will be updated from worker
         this.camera_x_m = 0;
 
@@ -161,7 +169,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('best-reward').textContent = bestReward.toFixed(2);
                 document.getElementById('avg-reward').textContent = avgReward.toFixed(2);
                 
-                // Update SAC-specific info (only if in training mode for these stats)
+                // Update agent-specific info (only if in training mode for these stats)
                 if (totalSteps !== undefined) {
                     document.getElementById('total-steps').textContent = totalSteps.toLocaleString();
                 }
@@ -440,16 +448,18 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (data.agentConfig) {
-            content += `\n--- SAC Agent Config ---\n`;
-            content += `Alpha (Entropy): ${data.agentConfig.alpha}\n`;
-            content += `Actor LR: ${data.agentConfig.actorLr}\n`;
-            content += `Critic LR: ${data.agentConfig.criticLr}\n`;
-            content += `Tau (Target Update): ${data.agentConfig.tau}\n`;
-            content += `Gamma (Discount): ${data.agentConfig.gamma}\n`;
-            content += `Batch Size: ${data.agentConfig.batchSize}\n`;
-            content += `Buffer: ${(data.bufferSize || 0).toLocaleString()} / ${data.agentConfig.bufferSize?.toLocaleString() || 'N/A'}\n`;
-            content += `Warmup Steps: ${data.agentConfig.warmupSteps}\n`;
-            content += `Train Freq (steps): ${data.agentConfig.trainFrequency}\n`;
+            content += `\n--- RL Agent Config ---\n`;
+            if (data.agentConfig.alpha !== undefined) {
+                content += `Alpha (Entropy): ${data.agentConfig.alpha}\n`;
+            }
+            if (data.agentConfig.actorLr !== undefined) content += `Actor LR: ${data.agentConfig.actorLr}\n`;
+            if (data.agentConfig.criticLr !== undefined) content += `Critic LR: ${data.agentConfig.criticLr}\n`;
+            if (data.agentConfig.tau !== undefined) content += `Tau (Target Update): ${data.agentConfig.tau}\n`;
+            if (data.agentConfig.gamma !== undefined) content += `Gamma (Discount): ${data.agentConfig.gamma}\n`;
+            if (data.agentConfig.batchSize !== undefined) content += `Batch Size: ${data.agentConfig.batchSize}\n`;
+            if (data.agentConfig.bufferSize !== undefined) content += `Buffer: ${(data.bufferSize || 0).toLocaleString()} / ${data.agentConfig.bufferSize?.toLocaleString() || 'N/A'}\n`;
+            if (data.agentConfig.warmupSteps !== undefined) content += `Warmup Steps: ${data.agentConfig.warmupSteps}\n`;
+            if (data.agentConfig.trainFrequency !== undefined) content += `Train Freq (steps): ${data.agentConfig.trainFrequency}\n`;
         }
 
         if (data.physicsParams) {
@@ -725,7 +735,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('best-reward').textContent = '0.00';
         document.getElementById('avg-reward').textContent = '0.00';
         
-        // Reset SAC-specific UI elements
+        // Reset agent-specific UI elements
         document.getElementById('buffer-size').textContent = '0';
         document.getElementById('total-steps').textContent = '0';
         document.getElementById('buffer-progress').textContent = '0/100K';

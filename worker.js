@@ -31,13 +31,22 @@ configureTensorFlowJS();
 class PendulumPhysics {
     constructor() {
         // Default parameters, Wasm will use these to initialize
-        const p = { cart_m: 1.0, m1: 0.1, m2: 0.1, l1_m: 1.0, l2_m: 1.0, g: 9.8 };
+        // Parameters aligned with the reference paper
+        const p = {
+            cart_m: 0.350,
+            m1: 0.133,
+            m2: 0.025,
+            l1_m: 0.5,
+            l2_m: 0.5,
+            g: 9.81
+        };
         // For --target no-modules, WasmPendulumPhysics becomes a global constructor.
         // self.WasmPendulumPhysics or just WasmPendulumPhysics should work.
         this.wasmInstance = new wasm_bindgen.WasmPendulumPhysics(p.cart_m, p.m1, p.m2, p.l1_m, p.l2_m, p.g);
         this.params = this.wasmInstance.get_params_js(); // Get params from Wasm
         this.state = this.wasmInstance.get_state_js();   // Get initial state from Wasm
-        this.actionMax = 5.0; // Reduced from 10.0 to limit max force
+        // The paper applies forces in the range [-15, 15] N
+        this.actionMax = 15.0;
         this.maxSteps = 1000;
         this.currentStep = 0;
         // Base reward weights (initial values)
@@ -101,7 +110,7 @@ class PendulumPhysics {
             // Episode ends if physics unstable, cart off track, or max steps reached.
             if (!physics_ok) {
                 done = true; this.lastTerminationReason = 'Physics Unstable';
-            } else if (Math.abs(this.state.cart_x_m) > 4.5) {
+            } else if (Math.abs(this.state.cart_x_m) > 2.4) {
                 done = true; this.lastTerminationReason = 'Cart Out of Bounds';
             } else if (this.currentStep >= this.maxSteps) {
                 done = true; this.lastTerminationReason = 'Max Episode Steps Reached';
@@ -139,8 +148,8 @@ class PendulumPhysics {
             (l1_m * (1 - cos_a1) + l2_m * (1 - cos_a2)) / (l1_m + l2_m); // 0→2
 
         // 2.2  Cart displacement (centre of rail at 0).
-        // Adjusted TRACK_HALF to match episode termination condition (abs(cart_x_m) > 4.5)
-        const TRACK_HALF = 4.5; 
+        // Termination occurs if |cart_x_m| > 2.4
+        const TRACK_HALF = 2.4;
         const cartPenalty = (cart_x_m / TRACK_HALF) ** 2; // Quadratic penalty: 0 @ centre, 1 @ rail end
 
         // 2.3  Effort penalty – square of commanded force, scaled to [0,1].
@@ -250,560 +259,177 @@ class ScaleLayer extends tf.layers.Layer {
     }
 }
 
-class SACAgent {
+// --- DDPG Agent Implementation ---
+class DDPGAgent {
     constructor() {
         this.stateSize = 8;
         this.actionSize = 1;
-        this.actionBounds = 1.0; // Actions in [-1, 1]
-        
-        // IMPROVED SAC Hyperparameters for better learning
-        this.actorLr = 0.0005; // Slightly higher than default
-        this.criticLr = 0.0005; // Slightly higher than default
-        this.initialAlpha = 0.2; // Starting entropy coefficient
-        this.alpha = this.initialAlpha;
+        this.actionBounds = 1.0; // actions in [-1,1]
+
+        this.actorLr = 1e-4;
+        this.criticLr = 1e-3;
         this.gamma = 0.99;
-        this.tau = 0.005; // Reduced from 0.01 for more stable target updates
-        this.batchSize = 128; // Reduced from 256 for more frequent updates
+        this.tau = 0.005;
+        this.batchSize = 256;
         this.bufferSize = 100000;
-        this.warmupSteps = 5000; // Increased for more initial random exploration
+        this.warmupSteps = AGENT_WARMUP_STEPS; // keep in sync with constant
 
-        // Range for policy log standard deviation and penalty weight
-        this.logStdMin = -2.0;
-        this.logStdMax = 0.5;
-        this.logStdPenalty = 0.01;
-
-        // Automatic entropy tuning
-        this.alphaLr = 0.0003;
-        this.logAlpha = tf.variable(tf.scalar(Math.log(this.initialAlpha)));
-        this.alphaOptimizer = tf.train.adam(this.alphaLr);
-        this.targetEntropy = -this.actionSize; // heuristic target
-        
-        // Experience replay
         this.replayBuffer = [];
         this.isReady = false;
-        
-        // State normalization
+
         this.stateRunningMean = new Array(this.stateSize).fill(0);
         this.stateRunningVar = new Array(this.stateSize).fill(1);
-        // For diagnostics
-        this.lastActorMean = null;
-        this.lastActorLogStd = null;
-        this.lastQ1Value = null;
-        this.lastQ2Value = null;
         this.stateCount = 0;
-        
+
         this.init();
     }
 
     async init() {
-        // Register custom layer
         tf.serialization.registerClass(ScaleLayer);
 
-        // Build networks
         this.actor = this.buildActor();
-        // Log actor summary to see layers
-        // this.actor.summary(); 
+        this.critic = this.buildCritic();
+        this.targetActor = this.buildActor();
+        this.targetCritic = this.buildCritic();
 
-        this.critic1 = this.buildCritic();
-        this.critic2 = this.buildCritic(); // Twin Q-networks
-        this.targetCritic1 = this.buildCritic();
-        this.targetCritic2 = this.buildCritic();
+        this.actorOptimizer = tf.train.adam(this.actorLr);
+        this.criticOptimizer = tf.train.adam(this.criticLr);
 
-        // Optimizers
-        this.actorOptimizer = tf.train.adam(this.actorLr, undefined, undefined, undefined, 1.0); // Added clipnorm
-        this.critic1Optimizer = tf.train.adam(this.criticLr, undefined, undefined, undefined, 1.0); // Added clipnorm
-        this.critic2Optimizer = tf.train.adam(this.criticLr, undefined, undefined, undefined, 1.0); // Added clipnorm
-
-        // Copy weights to target networks
         this.updateTargetNetworks(1.0);
         this.isReady = true;
-        
-        console.log('SAC Agent initialized with improved architecture');
     }
 
     buildActor() {
         const input = tf.input({shape: [this.stateSize]});
-        
-        // Larger network with proper initialization
-        let x = tf.layers.dense({
-            units: 256, 
-            activation: 'relu',
-            kernelInitializer: 'heNormal'
-        }).apply(input);
-        
-        x = tf.layers.layerNormalization().apply(x);
-        
-        x = tf.layers.dense({
-            units: 256, 
-            activation: 'relu',
-            kernelInitializer: 'heNormal'
-        }).apply(x);
-        
-        x = tf.layers.layerNormalization().apply(x);
-        
-        // Mean and log_std outputs for policy
-        const meanOutput = tf.layers.dense({
-            units: this.actionSize, 
-            activation: 'tanh', // Changed to tanh
-            kernelInitializer: 'truncatedNormal',
-            name: 'policy_mean'
-        }).apply(x);
-        
-        const logStdOutput = tf.layers.dense({
-            units: this.actionSize,
-            activation: 'tanh', // Changed to tanh
-            kernelInitializer: 'truncatedNormal',
-            biasInitializer: 'zeros',
-            name: 'policy_log_std'
-        }).apply(x);
-        
-        // Scale meanOutput by actionBounds
-        const scaledMeanOutput = new ScaleLayer({ scaleFactor: this.actionBounds, name: 'scale_action_mean' })
-            .apply(meanOutput);
-        
-        return tf.model({inputs: input, outputs: [scaledMeanOutput, logStdOutput]});
+        let x = tf.layers.dense({units: 400, activation: 'relu'}).apply(input);
+        x = tf.layers.dense({units: 300, activation: 'relu'}).apply(x);
+        const out = tf.layers.dense({units: this.actionSize, activation: 'tanh'}).apply(x);
+        const scaled = new ScaleLayer({scaleFactor: this.actionBounds}).apply(out);
+        return tf.model({inputs: input, outputs: scaled});
     }
 
     buildCritic() {
-        const stateInput = tf.input({shape: [this.stateSize], name: 'state'});
-        const actionInput = tf.input({shape: [this.actionSize], name: 'action'});
-        
-        // State processing
-        let stateFeatures = tf.layers.dense({
-            units: 256, 
-            activation: 'relu',
-            kernelInitializer: 'heNormal'
-        }).apply(stateInput);
-        
-        // Action processing
-        let actionFeatures = tf.layers.dense({
-            units: 256, 
-            activation: 'relu',
-            kernelInitializer: 'heNormal'
-        }).apply(actionInput);
-        
-        // Concatenate state and action features
-        const concat = tf.layers.concatenate().apply([stateFeatures, actionFeatures]);
-        
-        let x = tf.layers.layerNormalization().apply(concat);
-        
-        x = tf.layers.dense({
-            units: 256, 
-            activation: 'relu',
-            kernelInitializer: 'heNormal'
-        }).apply(x);
-        
-        x = tf.layers.layerNormalization().apply(x);
-        
-        const output = tf.layers.dense({
-            units: 1,
-            kernelInitializer: 'truncatedNormal'
-        }).apply(x);
-        
-        return tf.model({inputs: [stateInput, actionInput], outputs: output});
+        const stateInput = tf.input({shape: [this.stateSize]});
+        const actionInput = tf.input({shape: [this.actionSize]});
+        let s = tf.layers.dense({units: 400, activation: 'relu'}).apply(stateInput);
+        const concat = tf.layers.concatenate().apply([s, actionInput]);
+        let x = tf.layers.dense({units: 300, activation: 'relu'}).apply(concat);
+        const out = tf.layers.dense({units: 1}).apply(x);
+        return tf.model({inputs: [stateInput, actionInput], outputs: out});
     }
-    
+
     normalizeState(state) {
-        // Enhanced online normalization with robust numerical stability
         const normalized = [];
-        
-        // Validate input state first
-        if (!Array.isArray(state) || state.length !== this.stateSize) {
-            console.warn('Invalid state in normalizeState:', state);
-            return new Array(this.stateSize).fill(0); // Return safe default
-        }
-        
+        this.stateCount++;
+        const count = Math.min(this.stateCount, 10000);
         for (let i = 0; i < state.length; i++) {
-            // Check for invalid input values
-            if (!isFinite(state[i]) || isNaN(state[i])) {
-                console.warn(`Invalid state value at index ${i}:`, state[i]);
-                normalized[i] = 0; // Use safe default
-                continue;
-            }
-            
-            // Clamp extreme values before processing
-            const clampedValue = Math.max(-1000, Math.min(1000, state[i]));
-            
-            // Update running statistics with numerical stability
-            this.stateCount++;
-            const count = Math.min(this.stateCount, 10000); // Cap for numerical stability
-            
-            const delta = clampedValue - this.stateRunningMean[i];
+            const val = Math.max(-1000, Math.min(1000, state[i]));
+            const delta = val - this.stateRunningMean[i];
             this.stateRunningMean[i] += delta / count;
-            
-            // More stable variance calculation
-            const delta2 = clampedValue - this.stateRunningMean[i];
+            const delta2 = val - this.stateRunningMean[i];
             this.stateRunningVar[i] = (this.stateRunningVar[i] * (count - 1) + delta * delta2) / count;
-            
-            // Ensure variance doesn't become too small or invalid
-            this.stateRunningVar[i] = Math.max(this.stateRunningVar[i], 1e-6);
-            
-            // Check for invalid statistics
-            if (!isFinite(this.stateRunningMean[i]) || isNaN(this.stateRunningMean[i])) {
-                console.warn(`Invalid running mean at index ${i}, resetting`);
-                this.stateRunningMean[i] = 0;
-            }
-            
-            if (!isFinite(this.stateRunningVar[i]) || isNaN(this.stateRunningVar[i])) {
-                console.warn(`Invalid running variance at index ${i}, resetting`);
-                this.stateRunningVar[i] = 1;
-            }
-            
-            // Normalize with robust division
-            const std = Math.sqrt(this.stateRunningVar[i]);
-            const normalizedValue = (clampedValue - this.stateRunningMean[i]) / Math.max(std, 1e-6);
-            
-            // Final clipping and validation
-            normalized[i] = Math.max(-10, Math.min(10, normalizedValue));
-            
-            // Final safety check
-            if (!isFinite(normalized[i]) || isNaN(normalized[i])) {
-                console.warn(`Final normalized value invalid at index ${i}, using 0`);
-                normalized[i] = 0;
-            }
+            const std = Math.sqrt(Math.max(this.stateRunningVar[i], 1e-6));
+            normalized.push((val - this.stateRunningMean[i]) / std);
         }
-        
         return normalized;
     }
-    
-    sampleAction(mean, logStd, deterministic = false) {
-        return tf.tidy(() => {
-            try {
-                if (deterministic) {
-                    // 'mean' is already scaled and tanh'd by the actor network's output layer
-                    // So, for deterministic action, 'mean' itself is the action.
-                    const action = mean; 
-                    return {action, logProb: tf.zeros([action.shape[0], 1])};
-                }
-                
-                // logStd is now the direct output of a tanh layer, in [-1, 1]
-                // Scale it to a more appropriate range for log_std, e.g., [-5, 2]
-                const LOG_STD_MAX = this.logStdMax;
-                const LOG_STD_MIN = this.logStdMin;
-                const scaledLogStd = logStd.mul(0.5 * (LOG_STD_MAX - LOG_STD_MIN)).add(0.5 * (LOG_STD_MAX + LOG_STD_MIN));
 
-                const clippedLogStd = tf.clipByValue(scaledLogStd, LOG_STD_MIN, LOG_STD_MAX);
-                const std = tf.exp(clippedLogStd);
-
-                // Add small epsilon to prevent numerical issues
-                const epsilon = 1e-6;
-                const safeStd = tf.maximum(std, epsilon);
-                
-                const noise = tf.randomNormal(mean.shape);
-                // 'mean' is already scaled by actionBounds and passed through tanh in the actor.
-                // For sampling, we add noise to this pre-squashed mean, then re-apply tanh if necessary,
-                // but since 'mean' is already the output of a tanh, we can directly use it.
-                // The reparameterization trick: action = mean + std * noise
-                const actionSample = mean.add(safeStd.mul(noise));
-                const action = tf.tanh(actionSample); // Squash the sum to ensure it's within bounds for logProb calc
-                
-                // More robust log probability calculation
-                const normalizedAction = actionSample.sub(mean).div(safeStd); // Use actionSample before final tanh for logProb
-                
-                // Compute log probability with better numerical stability
-                const logProbNormal = tf.sum(
-                    tf.mul(-0.5, tf.square(normalizedAction))
-                    .sub(tf.scalar(0.5 * Math.log(2 * Math.PI)))
-                    .sub(clippedLogStd),
-                    -1,
-                    true
-                );
-                
-                // Tanh correction with numerical stability
-                const actionSquared = tf.square(action);
-                const oneMinusActionSq = tf.sub(1, actionSquared);
-                const safeOneMinusActionSq = tf.maximum(oneMinusActionSq, epsilon);
-                
-                const tanhCorrection = tf.sum(
-                    tf.log(safeOneMinusActionSq),
-                    -1,
-                    true
-                );
-                
-                const logProb = logProbNormal.add(tanhCorrection);
-                
-                // Final validation and clipping of log probabilities
-                const clippedLogProb = tf.clipByValue(logProb, -50, 50);
-
-                return {action, logProb: clippedLogProb, clippedLogStd};
-                
-            } catch (error) {
-                console.error('Error in sampleAction:', error);
-                // Return safe fallback values
-                const fallbackAction = tf.randomUniform(mean.shape, -1, 1);
-                const fallbackLogProb = tf.fill([mean.shape[0], 1], -1.0);
-                const fallbackLogStd = tf.fill([mean.shape[0], 1], 0.0);
-                return {action: fallbackAction, logProb: fallbackLogProb, clippedLogStd: fallbackLogStd};
-            }
-        });
-    }
-    
     chooseAction(state, deterministic = false) {
-        try {
-            return tf.tidy(() => {
-                // Validate input state
-                if (!Array.isArray(state) || state.length !== this.stateSize) {
-                    console.warn('Invalid state in chooseAction:', state);
-                    return 0; // Return safe default action
-                }
-                
-                const normalizedState = this.normalizeState(state);
-                
-                // Additional validation of normalized state
-                for (let i = 0; i < normalizedState.length; i++) {
-                    if (!isFinite(normalizedState[i]) || isNaN(normalizedState[i])) {
-                        console.warn('Invalid normalized state in chooseAction:', normalizedState);
-                        return 0; // Return safe default action
-                    }
-                }
-                
-                const stateTensor = tf.tensor2d([normalizedState]);
-                const [mean, logStd] = this.actor.apply(stateTensor);
-
-                // Store for diagnostics
-                this.lastActorMean = mean.dataSync()[0]; // Assuming actionSize is 1
-                this.lastActorLogStd = logStd.dataSync()[0]; // Assuming actionSize is 1
-                
-                // Validate network outputs
-                const meanData = mean.dataSync();
-                const logStdData = logStd.dataSync();
-                
-                if (meanData.some(x => !isFinite(x) || isNaN(x)) || 
-                    logStdData.some(x => !isFinite(x) || isNaN(x))) {
-                    console.warn('Invalid network outputs in chooseAction');
-                    return 0; // Return safe default action
-                }
-                
-                const {action, logProb: _logProb} = this.sampleAction(mean, logStd, deterministic);
-
-                // Get Q-values for the chosen action (for diagnostics)
-                const actionTensor = action; // action is already a tensor
-                this.lastQ1Value = this.critic1.apply([stateTensor, actionTensor]).dataSync()[0];
-                this.lastQ2Value = this.critic2.apply([stateTensor, actionTensor]).dataSync()[0];
-
-                const actionValue = action.dataSync()[0];
-                
-                // Final validation of action
-                if (!isFinite(actionValue) || isNaN(actionValue)) {
-                    console.warn('Invalid action generated:', actionValue);
-                    return 0; // Return safe default action
-                }
-                
-                // Clamp action to valid range
-                return Math.max(-1, Math.min(1, actionValue));
-            });
-        } catch (error) {
-            console.error('Error in chooseAction:', error);
-            return 0; // Return safe default action
-        }
-    }
-
-    getPolicyDiagnostics() {
-        return {
-            actorMean: this.lastActorMean,
-            actorLogStd: this.lastActorLogStd,
-            q1Value: this.lastQ1Value,
-            q2Value: this.lastQ2Value,
-        };
-    }
-    
-    remember(state, action, reward, nextState, done) {
-        this.replayBuffer.push({
-            state: this.normalizeState(state), 
-            action, 
-            reward, 
-            nextState: this.normalizeState(nextState), 
-            done
+        return tf.tidy(() => {
+            const normState = this.normalizeState(state);
+            const s = tf.tensor([normState]);
+            let action = this.actor.predict(s).flatten();
+            let val = action.dataSync()[0];
+            if (!deterministic) {
+                val += (Math.random() * 2 - 1) * 0.1;
+            }
+            return Math.max(-1, Math.min(1, val));
         });
-        
-        if (this.replayBuffer.length > this.bufferSize) {
+    }
+
+    remember(state, action, reward, nextState, done) {
+        if (this.replayBuffer.length >= this.bufferSize) {
             this.replayBuffer.shift();
         }
+        this.replayBuffer.push({state, action, reward, nextState, done});
     }
-    
-    train() {
-        if (this.replayBuffer.length < this.batchSize) return null;
 
-        // Sample batch
-        const batch = this.sampleBatch();
-        
-        return tf.tidy(() => {
-            const states = tf.tensor2d(batch.states);
-            const actions = tf.tensor2d(batch.actions);
-            const rewards = tf.tensor2d(batch.rewards);
-            const nextStates = tf.tensor2d(batch.nextStates);
-            const dones = tf.tensor2d(batch.dones);
-
-            // Update critics with memory management
-            const criticLossTensor = this.updateCritics(states, actions, rewards, nextStates, dones);
-            
-            // FIXED: Update actor every training step for better learning
-            const actorUpdateResult = this.updateActor(states); // Returns {loss, avgLogProb, logProbs} tensors
-            const alphaLossValue = this.updateAlpha(actorUpdateResult.logProbs);
-            actorUpdateResult.logProbs.dispose();
-            
-            // Soft update target networks
-            this.updateTargetNetworks(this.tau);
-            
-            // Extract values before tensors are disposed
-            const criticLossValue = criticLossTensor.dataSync()[0];
-            const actorLossValue = actorUpdateResult && actorUpdateResult.loss ? actorUpdateResult.loss.dataSync()[0] : null;
-            const avgLogProbValue = actorUpdateResult && actorUpdateResult.avgLogProb ? actorUpdateResult.avgLogProb.dataSync()[0] : null;
-            
-            // DEBUG: Log calculated losses in worker
-            console.log('[Worker] SACAgent.train() losses:', { criticLoss: criticLossValue, actorLoss: actorLossValue, alphaLoss: alphaLossValue, avgLogProb: avgLogProbValue, alpha: this.alpha });
-
-            return {
-                criticLoss: criticLossValue,
-                actorLoss: actorLossValue,
-                alphaLoss: alphaLossValue,
-                avgLogProb: avgLogProbValue,
-                alpha: this.alpha
-            };
-        });
-
-    }
-    
     sampleBatch() {
         const batch = {states: [], actions: [], rewards: [], nextStates: [], dones: []};
-        
-        // Validate replayBuffer before sampling
-        if (!this.replayBuffer || this.replayBuffer.length === 0) {
-            console.warn("Replay buffer is empty or invalid during sampleBatch.");
-            // Return an empty batch or handle error appropriately
-            return batch; 
-        }
-
         for (let i = 0; i < this.batchSize; i++) {
             const idx = Math.floor(Math.random() * this.replayBuffer.length);
-            const experience = this.replayBuffer[idx];
-            
-            if (!experience) continue; // Skip if experience is undefined
-            batch.states.push(experience.state);
-            batch.actions.push([experience.action]);
-            batch.rewards.push([experience.reward]);
-            batch.nextStates.push(experience.nextState);
-            batch.dones.push([experience.done ? 1 : 0]);
+            const e = this.replayBuffer[idx];
+            batch.states.push(e.state);
+            batch.actions.push([e.action]);
+            batch.rewards.push([e.reward]);
+            batch.nextStates.push(e.nextState);
+            batch.dones.push([e.done ? 1 : 0]);
         }
-        
         return batch;
     }
-    
-    updateCritics(states, actions, rewards, nextStates, dones) {
-        // Target Q-values calculation
-        const targetQ = tf.tidy(() => { // This tidy keeps the returned targetQ tensor
-            const [nextMeans, nextLogStds] = this.actor.apply(nextStates);
-            const {action: nextActions, logProb: nextLogProbs} = this.sampleAction(nextMeans, nextLogStds);
-            
-            const targetQ1 = this.targetCritic1.apply([nextStates, nextActions]);
-            const targetQ2 = this.targetCritic2.apply([nextStates, nextActions]);
-            const minTargetQ = tf.minimum(targetQ1, targetQ2);
-            
-            const entropyTerm = tf.mul(this.alpha, nextLogProbs);
-            const targetValue = minTargetQ.sub(entropyTerm);
-            
-            return rewards.add(
-                dones.mul(-1).add(1).mul(this.gamma).mul(targetValue)
+
+    train() {
+        if (this.replayBuffer.length < this.batchSize) return {};
+
+        const b = this.sampleBatch();
+        const states = tf.tensor(b.states);
+        const actions = tf.tensor(b.actions);
+        const rewards = tf.tensor(b.rewards);
+        const nextStates = tf.tensor(b.nextStates);
+        const dones = tf.tensor(b.dones);
+
+        const criticLossTensor = this.criticOptimizer.minimize(() => {
+            const nextActions = this.targetActor.predict(nextStates);
+            const qNext = this.targetCritic.predict([nextStates, nextActions]).reshape([this.batchSize]);
+            const y = rewards.reshape([this.batchSize]).add(
+                dones.reshape([this.batchSize]).mul(-1).add(1).mul(this.gamma).mul(qNext)
             );
-        });
-    
-        // Update critic 1
-        const critic1LossFn = () => {
-            const currentQ1 = this.critic1.apply([states, actions]);
-            return tf.mean(tf.square(targetQ.sub(currentQ1)));
-        };
-    
-        const critic1Result = tf.variableGrads(critic1LossFn, this.critic1.trainableWeights.map(v => v.val));
-        this.critic1Optimizer.applyGradients(critic1Result.grads);
-        tf.dispose(critic1Result.grads); // Explicitly dispose gradients
-    
-        // Update critic 2
-        const critic2LossFn = () => {
-            const currentQ2 = this.critic2.apply([states, actions]);
-            return tf.mean(tf.square(targetQ.sub(currentQ2)));
-        };
-    
-        const critic2Result = tf.variableGrads(critic2LossFn, this.critic2.trainableWeights.map(v => v.val));
-        this.critic2Optimizer.applyGradients(critic2Result.grads);
-        tf.dispose(critic2Result.grads); // Explicitly dispose gradients
-    
-        // Return the loss value from critic1 that was used for gradient calculation.
-        // critic1Result.value is kept by tf.variableGrads.
-        return critic1Result.value;
-    }
-    
-    updateActor(states) {
-        let lossTensor, avgLogProbTensor, logProbsOut;
+            const q = this.critic.predict([states, actions]).reshape([this.batchSize]);
+            return tf.losses.meanSquaredError(y, q);
+        }, true);
 
-        const grads = tf.variableGrads(() => {
-            const [means, logStds] = this.actor.apply(states);
-            const {action: newActions, logProb: logProbs, clippedLogStd} = this.sampleAction(means, logStds); // logProbs is used here
-            
-            const q1 = this.critic1.apply([states, newActions]);
-            const q2 = this.critic2.apply([states, newActions]);
-            const minQ = tf.minimum(q1, q2);
+        const actorLossTensor = this.actorOptimizer.minimize(() => {
+            const act = this.actor.predict(states);
+            const qVal = this.critic.predict([states, act]).reshape([this.batchSize]);
+            return tf.neg(tf.mean(qVal));
+        }, true);
 
-            // SAC actor loss: maximize Q - alpha * entropy
-            const entropyTerm = tf.mul(this.alpha, logProbs);
-            let currentLoss = tf.mean(entropyTerm.sub(minQ));
-            if (this.logStdPenalty > 0) {
-                const penalty = tf.mean(tf.square(clippedLogStd));
-                currentLoss = currentLoss.add(penalty.mul(this.logStdPenalty));
-            }
+        this.updateTargetNetworks(this.tau);
 
-            // lossTensor and avgLogProbTensor were assigned here.
-            // currentLoss is the return value, so it will be grads.value.
-            // logProbs (and tf.mean(logProbs)) created here might be tidied by variableGrads.
-            return currentLoss; // Return loss for gradient calculation
-        }, this.actor.trainableWeights.map(v => v.val));
+        const criticLoss = criticLossTensor ? criticLossTensor.dataSync()[0] : 0;
+        const actorLoss = actorLossTensor ? actorLossTensor.dataSync()[0] : 0;
 
-        this.actorOptimizer.applyGradients(grads.grads);
-        tf.dispose(grads.grads); // Explicitly dispose gradients
+        // Dispose tensors to prevent memory leaks
+        states.dispose();
+        actions.dispose();
+        rewards.dispose();
+        nextStates.dispose();
+        dones.dispose();
+        if (criticLossTensor) criticLossTensor.dispose();
+        if (actorLossTensor) actorLossTensor.dispose();
 
-        // Re-evaluate policy to get avgLogProb safely, ensuring tensors are not disposed.
-        // This is slightly less efficient but safer for tensor lifecycle.
-        const [finalMeans, finalLogStds] = this.actor.apply(states);
-        const {logProb: finalLogProbs} = this.sampleAction(finalMeans, finalLogStds, false);
-        avgLogProbTensor = tf.mean(finalLogProbs); // This tensor is created now.
-        logProbsOut = finalLogProbs;
-
-        // grads.value is the loss tensor computed by the function passed to variableGrads, and it's kept.
-        lossTensor = grads.value;
-
-        return { loss: lossTensor, avgLogProb: avgLogProbTensor, logProbs: logProbsOut }; // These tensors should now be valid
-    }
-
-    updateAlpha(logProbs) {
-        const alphaGrads = tf.variableGrads(() => {
-            return tf.tidy(() => {
-                const diff = logProbs.add(this.targetEntropy);
-                return tf.mean(this.logAlpha.mul(diff));
-            });
-        }, [this.logAlpha]);
-
-        this.alphaOptimizer.applyGradients(alphaGrads.grads);
-        const lossValue = alphaGrads.value.dataSync()[0];
-        tf.dispose(alphaGrads.grads);
-        alphaGrads.value.dispose();
-        this.alpha = Math.exp(this.logAlpha.dataSync()[0]);
-        return lossValue;
+        return {criticLoss, actorLoss};
     }
 
     updateTargetNetworks(tau) {
-        // Soft update target critic networks
         const updateTarget = (target, source) => {
-            const targetWeights = target.getWeights();
-            const sourceWeights = source.getWeights();
-            const newWeights = sourceWeights.map((w, i) => 
-                tf.tidy(() => w.mul(tau).add(targetWeights[i].mul(1 - tau)))
-            );
-            target.setWeights(newWeights);
+            const tw = target.getWeights();
+            const sw = source.getWeights();
+            const newW = sw.map((w, i) => tf.tidy(() => w.mul(tau).add(tw[i].mul(1 - tau))));
+            target.setWeights(newW);
+            tf.dispose(tw);
+            tf.dispose(sw);
+            tf.dispose(newW);
         };
+        updateTarget(this.targetActor, this.actor);
+        updateTarget(this.targetCritic, this.critic);
+    }
 
-        updateTarget(this.targetCritic1, this.critic1);
-        updateTarget(this.targetCritic2, this.critic2);
+    getPolicyDiagnostics() {
+        return {};
     }
 }
+
 
 // --- Worker Globals ---
 let allowRender = true; // main-thread can disable to save bandwidth during training
@@ -832,7 +458,7 @@ let stepsSinceLastSpsCheck = 0;
 // const WARMUP_STEPS = 1000; // This is superseded by AGENT_WARMUP_STEPS for agent logic
 const TRAIN_FREQUENCY = 1; // Train after every block of userSetStepsPerFrame steps if slider is >=1x
 const MAX_EPISODE_STEPS = 2000; // Longer episodes
-const AGENT_WARMUP_STEPS = 5000; // Should match agent.warmupSteps
+const AGENT_WARMUP_STEPS = 1000; // Should match agent.warmupSteps
 // DEBUGGING HELPERS - Add comprehensive NaN detection
 function isValidNumber(value) {
     return typeof value === 'number' && isFinite(value) && !isNaN(value);
@@ -862,7 +488,7 @@ function validateReward(reward, context = 'unknown') {
 }
 
 function init() {
-    agent = new SACAgent();
+    agent = new DDPGAgent();
     physics = new PendulumPhysics();
     physics.maxSteps = MAX_EPISODE_STEPS; // Update physics
     state = physics.reset();
@@ -885,7 +511,7 @@ function init() {
     bestReward = -Infinity;
     lastSpsCheckTime = performance.now();
     stepsSinceLastSpsCheck = 0;
-    console.log('Initializing robust SAC agent for double pendulum...');
+    console.log('Initializing DDPG agent for double pendulum...');
 }
 
 function simulationStep() {
@@ -999,21 +625,18 @@ function simulationStep() {
             policyDiagnostics: lastPolicyDiagnostics,
             terminationReason: physics.getTerminationReason(),
             agentConfig: {
-                alpha: agent.alpha,
                 actorLr: agent.actorLr,
                 criticLr: agent.criticLr,
                 batchSize: agent.batchSize,
                 tau: agent.tau,
                 gamma: agent.gamma,
-                bufferSize: agent.bufferSize, // Agent's configured max buffer
-                warmupSteps: AGENT_WARMUP_STEPS, // Use the agent's actual warmup steps
-                trainFrequency: TRAIN_FREQUENCY, // Use the global constant
+                bufferSize: agent.bufferSize,
+                warmupSteps: AGENT_WARMUP_STEPS,
+                trainFrequency: TRAIN_FREQUENCY,
                 stateSize: agent.stateSize,
                 actionSize: agent.actionSize,
-                alphaLr: agent.alphaLr,
-                targetEntropy: agent.targetEntropy,
-                stateNormalizationMean: agent.stateRunningMean.map(v => parseFloat(v.toFixed(4))), // Add normalization stats
-                stateNormalizationVar: agent.stateRunningVar.map(v => parseFloat(v.toFixed(4)))   // Add normalization stats
+                stateNormalizationMean: agent.stateRunningMean.map(v => parseFloat(v.toFixed(4))),
+                stateNormalizationVar: agent.stateRunningVar.map(v => parseFloat(v.toFixed(4)))
             },
             physicsRewardConfig: physics.getEffectiveRewardWeights(),
             currentSpeed: currentSimStepsPerFrame
@@ -1166,19 +789,16 @@ self.onmessage = function(e) {
 
             // Send initial agent config with training_started message
             const initialAgentConfig = agent ? {
-                alpha: agent.alpha,
                 actorLr: agent.actorLr,
                 criticLr: agent.criticLr,
                 batchSize: agent.batchSize,
                 tau: agent.tau,
                 gamma: agent.gamma,
                 bufferSize: agent.bufferSize,
-                warmupSteps: AGENT_WARMUP_STEPS, // Use the agent's actual warmup steps
+                warmupSteps: AGENT_WARMUP_STEPS,
                 trainFrequency: TRAIN_FREQUENCY,
                 stateSize: agent.stateSize,
-                actionSize: agent.actionSize,
-                alphaLr: agent.alphaLr,
-                targetEntropy: agent.targetEntropy
+                actionSize: agent.actionSize
             } : null;
 
             self.postMessage({ type: 'training_started', payload: { status: 'Training Active', agentConfig: initialAgentConfig } });

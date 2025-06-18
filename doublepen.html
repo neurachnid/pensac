@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SAC Double Pendulum Control - TensorFlow.js</title>
+    <title>DDPG Double Pendulum Control - TensorFlow.js</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -13,8 +13,8 @@
 <body class="flex flex-col items-center justify-center min-h-screen p-4">
 
     <div class="text-center mb-6">
-        <h1 class="text-4xl font-bold text-white mb-2">SAC Double Pendulum Control</h1>
-        <p class="text-lg text-gray-400">A robust Soft Actor-Critic agent learning to swing-up and balance a double pendulum using TensorFlow.js.</p>
+        <h1 class="text-4xl font-bold text-white mb-2">DDPG Double Pendulum Control</h1>
+        <p class="text-lg text-gray-400">A Deep Deterministic Policy Gradient agent learning to swing-up and balance a double pendulum using TensorFlow.js.</p>
     </div>
     
     <!-- Statistics Display -->
@@ -25,7 +25,7 @@
       </div>
       <div class="stat-card">
           <p class="text-sm text-gray-400">Learning Mode</p>
-          <p id="learning-mode" class="text-lg font-bold text-purple-400">SAC</p>
+        <p id="learning-mode" class="text-lg font-bold text-purple-400">DDPG</p>
       </div>
       <div class="stat-card">
           <p class="text-sm text-gray-400">Current Reward</p>
@@ -44,11 +44,11 @@
     <!-- Training Progress Display -->
     <div class="w-full max-w-6xl mb-4">
         <div class="stat-card">
-            <p class="text-sm text-gray-400 mb-2">SAC Agent Training Progress</p>
+            <p class="text-sm text-gray-400 mb-2">DDPG Agent Training Progress</p>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-300">
                 <div>
                     <p>🎯 <strong>Goal:</strong> Swing up both pendulums and maintain balance</p>
-                    <p>🤖 <strong>Algorithm:</strong> Soft Actor-Critic (SAC) with twin Q-networks</p>
+                    <p>🤖 <strong>Algorithm:</strong> Deep Deterministic Policy Gradient (DDPG)</p>
                     <p>📈 <strong>Avg Reward (last 10):</strong> <span id="avg-reward" class="text-green-400 font-bold">0.0</span></p>
                 </div>
                 <div>
