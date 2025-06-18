@@ -31,13 +31,22 @@ configureTensorFlowJS();
 class PendulumPhysics {
     constructor() {
         // Default parameters, Wasm will use these to initialize
-        const p = { cart_m: 1.0, m1: 0.1, m2: 0.1, l1_m: 1.0, l2_m: 1.0, g: 9.8 };
+        // Parameters aligned with the reference paper
+        const p = {
+            cart_m: 0.350,
+            m1: 0.133,
+            m2: 0.025,
+            l1_m: 0.5,
+            l2_m: 0.5,
+            g: 9.81
+        };
         // For --target no-modules, WasmPendulumPhysics becomes a global constructor.
         // self.WasmPendulumPhysics or just WasmPendulumPhysics should work.
         this.wasmInstance = new wasm_bindgen.WasmPendulumPhysics(p.cart_m, p.m1, p.m2, p.l1_m, p.l2_m, p.g);
         this.params = this.wasmInstance.get_params_js(); // Get params from Wasm
         this.state = this.wasmInstance.get_state_js();   // Get initial state from Wasm
-        this.actionMax = 5.0; // Reduced from 10.0 to limit max force
+        // The paper applies forces in the range [-15, 15] N
+        this.actionMax = 15.0;
         this.maxSteps = 1000;
         this.currentStep = 0;
         // Base reward weights (initial values)
@@ -101,7 +110,7 @@ class PendulumPhysics {
             // Episode ends if physics unstable, cart off track, or max steps reached.
             if (!physics_ok) {
                 done = true; this.lastTerminationReason = 'Physics Unstable';
-            } else if (Math.abs(this.state.cart_x_m) > 4.5) {
+            } else if (Math.abs(this.state.cart_x_m) > 2.4) {
                 done = true; this.lastTerminationReason = 'Cart Out of Bounds';
             } else if (this.currentStep >= this.maxSteps) {
                 done = true; this.lastTerminationReason = 'Max Episode Steps Reached';
@@ -139,8 +148,8 @@ class PendulumPhysics {
             (l1_m * (1 - cos_a1) + l2_m * (1 - cos_a2)) / (l1_m + l2_m); // 0→2
 
         // 2.2  Cart displacement (centre of rail at 0).
-        // Adjusted TRACK_HALF to match episode termination condition (abs(cart_x_m) > 4.5)
-        const TRACK_HALF = 4.5; 
+        // Termination occurs if |cart_x_m| > 2.4
+        const TRACK_HALF = 2.4;
         const cartPenalty = (cart_x_m / TRACK_HALF) ** 2; // Quadratic penalty: 0 @ centre, 1 @ rail end
 
         // 2.3  Effort penalty – square of commanded force, scaled to [0,1].

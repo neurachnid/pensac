@@ -7,7 +7,15 @@ class PendulumRenderer {
         this.p_ctx = this.pendulumCanvas.getContext('2d');
         this.traceCanvas = document.getElementById('traceCanvas');
         this.t_ctx = this.traceCanvas.getContext('2d');
-        this.params = { cart_m: 1.0, m1: 0.1, m2: 0.1, l1_m: 1.0, l2_m: 1.0, g: 9.8 }; // Default params
+        // Physical parameters from the referenced DDPG paper
+        this.params = {
+            cart_m: 0.350,
+            m1: 0.133,
+            m2: 0.025,
+            l1_m: 0.5,
+            l2_m: 0.5,
+            g: 9.81
+        };
         this.state = null; // This will be updated from worker
         this.camera_x_m = 0;
 
