@@ -251,14 +251,21 @@ class SACAgent {
         this.actionBounds = 1.0; // Actions in [-1, 1]
         
         // IMPROVED SAC Hyperparameters for better learning
-        this.actorLr = 0.0005; // Increased from 0.0003
-        this.criticLr = 0.0005; // Increased from 0.0003
-        this.alpha = 0.5; // Increased significantly to encourage more exploration
+        this.actorLr = 0.0005; // Slightly higher than default
+        this.criticLr = 0.0005; // Slightly higher than default
+        this.initialAlpha = 0.2; // Starting entropy coefficient
+        this.alpha = this.initialAlpha;
         this.gamma = 0.99;
         this.tau = 0.005; // Reduced from 0.01 for more stable target updates
         this.batchSize = 128; // Reduced from 256 for more frequent updates
         this.bufferSize = 100000;
         this.warmupSteps = 5000; // Increased for more initial random exploration
+
+        // Automatic entropy tuning
+        this.alphaLr = 0.0003;
+        this.logAlpha = tf.variable(tf.scalar(Math.log(this.initialAlpha)));
+        this.alphaOptimizer = tf.train.adam(this.alphaLr);
+        this.targetEntropy = -this.actionSize; // heuristic target
         
         // Experience replay
         this.replayBuffer = [];
@@ -619,7 +626,9 @@ class SACAgent {
             const criticLossTensor = this.updateCritics(states, actions, rewards, nextStates, dones);
             
             // FIXED: Update actor every training step for better learning
-            const actorUpdateResult = this.updateActor(states); // Returns {loss, avgLogProb} tensors
+            const actorUpdateResult = this.updateActor(states); // Returns {loss, avgLogProb, logProbs} tensors
+            const alphaLossValue = this.updateAlpha(actorUpdateResult.logProbs);
+            actorUpdateResult.logProbs.dispose();
             
             // Soft update target networks
             this.updateTargetNetworks(this.tau);
@@ -630,12 +639,14 @@ class SACAgent {
             const avgLogProbValue = actorUpdateResult && actorUpdateResult.avgLogProb ? actorUpdateResult.avgLogProb.dataSync()[0] : null;
             
             // DEBUG: Log calculated losses in worker
-            console.log('[Worker] SACAgent.train() losses:', { criticLoss: criticLossValue, actorLoss: actorLossValue, avgLogProb: avgLogProbValue });
+            console.log('[Worker] SACAgent.train() losses:', { criticLoss: criticLossValue, actorLoss: actorLossValue, alphaLoss: alphaLossValue, avgLogProb: avgLogProbValue, alpha: this.alpha });
 
             return {
-                criticLoss: criticLossValue, 
+                criticLoss: criticLossValue,
                 actorLoss: actorLossValue,
-                avgLogProb: avgLogProbValue
+                alphaLoss: alphaLossValue,
+                avgLogProb: avgLogProbValue,
+                alpha: this.alpha
             };
         });
 
@@ -710,7 +721,7 @@ class SACAgent {
     }
     
     updateActor(states) {
-        let lossTensor, avgLogProbTensor;
+        let lossTensor, avgLogProbTensor, logProbsOut;
 
         const grads = tf.variableGrads(() => {
             const [means, logStds] = this.actor.apply(states);
@@ -738,11 +749,28 @@ class SACAgent {
         const [finalMeans, finalLogStds] = this.actor.apply(states);
         const {logProb: finalLogProbs} = this.sampleAction(finalMeans, finalLogStds, false);
         avgLogProbTensor = tf.mean(finalLogProbs); // This tensor is created now.
+        logProbsOut = finalLogProbs;
 
         // grads.value is the loss tensor computed by the function passed to variableGrads, and it's kept.
         lossTensor = grads.value;
 
-        return { loss: lossTensor, avgLogProb: avgLogProbTensor }; // These tensors should now be valid
+        return { loss: lossTensor, avgLogProb: avgLogProbTensor, logProbs: logProbsOut }; // These tensors should now be valid
+    }
+
+    updateAlpha(logProbs) {
+        const alphaGrads = tf.variableGrads(() => {
+            return tf.tidy(() => {
+                const diff = logProbs.add(this.targetEntropy);
+                return tf.mean(this.logAlpha.mul(diff));
+            });
+        }, [this.logAlpha]);
+
+        this.alphaOptimizer.applyGradients(alphaGrads.grads);
+        const lossValue = alphaGrads.value.dataSync()[0];
+        tf.dispose(alphaGrads.grads);
+        alphaGrads.value.dispose();
+        this.alpha = Math.exp(this.logAlpha.dataSync()[0]);
+        return lossValue;
     }
 
     updateTargetNetworks(tau) {
@@ -966,6 +994,8 @@ function simulationStep() {
                 trainFrequency: TRAIN_FREQUENCY, // Use the global constant
                 stateSize: agent.stateSize,
                 actionSize: agent.actionSize,
+                alphaLr: agent.alphaLr,
+                targetEntropy: agent.targetEntropy,
                 stateNormalizationMean: agent.stateRunningMean.map(v => parseFloat(v.toFixed(4))), // Add normalization stats
                 stateNormalizationVar: agent.stateRunningVar.map(v => parseFloat(v.toFixed(4)))   // Add normalization stats
             },
@@ -1130,7 +1160,9 @@ self.onmessage = function(e) {
                 warmupSteps: AGENT_WARMUP_STEPS, // Use the agent's actual warmup steps
                 trainFrequency: TRAIN_FREQUENCY,
                 stateSize: agent.stateSize,
-                actionSize: agent.actionSize
+                actionSize: agent.actionSize,
+                alphaLr: agent.alphaLr,
+                targetEntropy: agent.targetEntropy
             } : null;
 
             self.postMessage({ type: 'training_started', payload: { status: 'Training Active', agentConfig: initialAgentConfig } });
