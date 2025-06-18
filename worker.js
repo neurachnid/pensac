@@ -288,6 +288,7 @@ class SACAgent {
         // For diagnostics
         this.lastActorMean = null;
         this.lastActorLogStd = null;
+        this.lastClippedLogStd = null;
         this.lastQ1Value = null;
         this.lastQ2Value = null;
         this.stateCount = 0;
@@ -574,7 +575,8 @@ class SACAgent {
                     return 0; // Return safe default action
                 }
                 
-                const {action, logProb: _logProb} = this.sampleAction(mean, logStd, deterministic);
+                const {action, logProb: _logProb, clippedLogStd} = this.sampleAction(mean, logStd, deterministic);
+                this.lastClippedLogStd = clippedLogStd.dataSync()[0];
 
                 // Get Q-values for the chosen action (for diagnostics)
                 const actionTensor = action; // action is already a tensor
@@ -602,6 +604,7 @@ class SACAgent {
         return {
             actorMean: this.lastActorMean,
             actorLogStd: this.lastActorLogStd,
+            clippedLogStd: this.lastClippedLogStd,
             q1Value: this.lastQ1Value,
             q2Value: this.lastQ2Value,
         };

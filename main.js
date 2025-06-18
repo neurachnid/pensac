@@ -436,6 +436,8 @@ document.addEventListener('DOMContentLoaded', () => {
             content += `\n--- Last Training Batch ---\n`;
             content += `Actor Loss: ${latestDebugSnapshot.trainingLosses.actorLoss?.toFixed(4) || 'N/A'}\n`;
             content += `Critic Loss: ${latestDebugSnapshot.trainingLosses.criticLoss?.toFixed(4) || 'N/A'}\n`;
+            content += `Alpha Loss: ${latestDebugSnapshot.trainingLosses.alphaLoss?.toFixed(4) || 'N/A'}\n`;
+            content += `Alpha Value: ${latestDebugSnapshot.trainingLosses.alpha?.toFixed(4) || 'N/A'}\n`;
             content += `Avg Policy LogProb: ${latestDebugSnapshot.trainingLosses.avgLogProb?.toFixed(4) || 'N/A'}\n`;
         }
 
@@ -486,6 +488,7 @@ document.addEventListener('DOMContentLoaded', () => {
             content += `\n--- Agent Internals (Current Step) ---\n`;
             content += `Actor Mean: ${data.policyDiagnostics.actorMean?.toFixed(4) || 'N/A'}\n`;
             content += `Actor LogStd: ${data.policyDiagnostics.actorLogStd?.toFixed(4) || 'N/A'}\n`;
+            content += `Clipped LogStd: ${data.policyDiagnostics.clippedLogStd?.toFixed(4) || 'N/A'}\n`;
             content += `Critic Q1 (for action): ${data.policyDiagnostics.q1Value?.toFixed(4) || 'N/A'}\n`;
             content += `Critic Q2 (for action): ${data.policyDiagnostics.q2Value?.toFixed(4) || 'N/A'}\n`;
         }
