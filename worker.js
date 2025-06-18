@@ -344,11 +344,11 @@ class DDPGAgent {
         const updateTarget = (target, source) => {
             const tw = target.getWeights();
             const sw = source.getWeights();
-            const newW = sw.map((w, i) => tf.tidy(() => w.mul(tau).add(tw[i].mul(1 - tau))));
+            const newW = sw.map((w, i) => tf.tidy(() =>
+                w.mul(tau).add(tw[i].mul(1 - tau))
+            ));
             target.setWeights(newW);
-            tf.dispose(tw);
-            tf.dispose(sw);
-            tf.dispose(newW);
+            tf.dispose(newW); // Safe to dispose temporary tensors
         };
         updateTarget(this.targetActor, this.actor);
         updateTarget(this.targetCritic, this.critic);
