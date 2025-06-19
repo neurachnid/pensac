@@ -208,6 +208,8 @@ class DDPGAgent {
         this.stateRunningVar = new Array(this.stateSize).fill(1);
         this.stateCount = 0;
 
+        this.lastDiagnostics = {};
+
         this.init();
     }
 
@@ -265,13 +267,35 @@ class DDPGAgent {
         return tf.tidy(() => {
             const normState = this.normalizeState(state);
             const s = tf.tensor([normState]);
-            let action = this.actor.predict(s).flatten();
-            let val = action.dataSync()[0];
+
+            const actorOut = this.actor.predict(s).flatten();
+            let meanVal = actorOut.dataSync()[0];
+            let chosenVal = meanVal;
+
             if (!deterministic) {
-                val += (Math.random() * 2 - 1) * 0.1;
+                chosenVal += (Math.random() * 2 - 1) * 0.1;
             }
-            return Math.max(-1, Math.min(1, val));
+
+            chosenVal = Math.max(-1, Math.min(1, chosenVal));
+
+            const criticQ = this.critic
+                .predict([s, tf.tensor([[chosenVal]])])
+                .reshape([1]);
+            const qVal = criticQ.dataSync()[0];
+
+            this.lastDiagnostics = {
+                actorMean: meanVal,
+                actorLogStd: null,
+                criticQ1: qVal,
+                criticQ2: null
+            };
+
+            return chosenVal;
         });
+    }
+
+    getPolicyDiagnostics() {
+        return this.lastDiagnostics || {};
     }
 
     remember(state, action, reward, nextState, done) {
@@ -368,9 +392,6 @@ class DDPGAgent {
         updateTarget(this.targetCritic, this.critic);
     }
 
-    getPolicyDiagnostics() {
-        return {};
-    }
 }
 
 
@@ -565,7 +586,8 @@ function simulationStep() {
             trainingLosses: lastTrainingLosses, 
             lastStepRewardComponents: physics.getRewardComponents(),
             // Send the action and diagnostics for the step that ended the episode
-            lastAction: latestAction, 
+            lastAction: latestAction,
+            policyDiagnostics: lastPolicyDiagnostics,
             terminationReason: physics.getTerminationReason(),
             agentConfig: {
                 actorLr: agent.actorLr,
@@ -688,16 +710,17 @@ function runSimulationLoop() {
     // Send render data with validation
     if (physics && physics.state) {
         if (allowRender && validateState(Object.values(physics.state), 'render-physics')) {
-            self.postMessage({ 
+            self.postMessage({
                     type: 'render_data',
                     // physics.state is now directly from Wasm via physics.wasmInstance.get_state_js()
-                payload: { 
-                    state: physics.state, 
+                payload: {
+                    state: physics.state,
                     params: physics.params,
                     action: isValidNumber(latestAction) ? latestAction : 0,
                     totalSteps: (simulationMode === 'TRAINING' && !isObservingPolicyWhileTrainingPaused) ? totalSteps : undefined,
-                    isWarmup: simulationMode === 'TRAINING' && totalSteps < AGENT_WARMUP_STEPS // Use agent's warmup
-                } 
+                    isWarmup: simulationMode === 'TRAINING' && totalSteps < AGENT_WARMUP_STEPS, // Use agent's warmup
+                    policyDiagnostics: lastPolicyDiagnostics
+                }
             });
         }
     }
