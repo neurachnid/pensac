@@ -346,7 +346,6 @@ class DDPGAgent {
             target.setWeights(newW);
             tf.dispose(tw);
             tf.dispose(sw);
-            tf.dispose(newW);
         };
         updateTarget(this.targetActor, this.actor);
         updateTarget(this.targetCritic, this.critic);
