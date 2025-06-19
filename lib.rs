@@ -1,7 +1,6 @@
 use wasm_bindgen::prelude::*;
 use serde::{Serialize, Deserialize};
 use std::f64::consts::PI; // Import Rust's PI constant for f64
-use js_sys::{Math}; // For Math.random and Math.PI
 
 // For debugging: panic messages will go to console.error
 #[cfg(feature = "console_error_panic_hook")]
@@ -60,38 +59,26 @@ impl WasmPendulumPhysics {
     #[wasm_bindgen(constructor)]
     pub fn new(cart_m: f64, m1: f64, m2: f64, l1_m: f64, l2_m: f64, g: f64) -> Self {
         let params = PhysicsParams { cart_m, m1, m2, l1_m, l2_m, g };
-        let initial_state = Self::get_initial_random_state();
+        let initial_state = Self::get_initial_down_state();
         WasmPendulumPhysics {
             params,
             state: initial_state,
         }
     }
 
-    fn get_initial_random_state() -> PhysicsState {
-        let noise = || (Math::random() - 0.5);
-        if Math::random() < 0.8 {
-            PhysicsState {
-                a1: noise() * 0.3, // No PI here, small perturbations
-                a2: noise() * 0.3, // No PI here, small perturbations
-                a1_v: noise() * 1.0,
-                a2_v: noise() * 1.0,
-                cart_x_m: noise() * 0.3,
-                cart_x_v_m: noise() * 0.2,
-            }
-        } else {
-            PhysicsState {
-                a1: noise() * PI, 
-                a2: noise() * PI, 
-                a1_v: noise() * 3.0,
-                a2_v: noise() * 3.0,
-                cart_x_m: noise() * 1.0,
-                cart_x_v_m: noise() * 0.5,
-            }
+    fn get_initial_down_state() -> PhysicsState {
+        PhysicsState {
+            a1: 0.0,
+            a2: 0.0,
+            a1_v: 0.0,
+            a2_v: 0.0,
+            cart_x_m: 0.0,
+            cart_x_v_m: 0.0,
         }
     }
 
     pub fn reset(&mut self) {
-        self.state = Self::get_initial_random_state();
+        self.state = Self::get_initial_down_state();
     }
 
     // Returns the current state as a JS object
