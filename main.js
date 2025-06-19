@@ -475,23 +475,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (data.physicsRewardConfig) {
-            content += `\n--- Reward Shaping (Current Effective) ---\n`;
-            content += `Weight Height (w.H): ${data.physicsRewardConfig.H?.toFixed(3) || 'N/A'}\n`;
-            content += `Weight Pos (w.dx): ${data.physicsRewardConfig.dx?.toFixed(3) || 'N/A'}\n`;
-            content += `Weight Effort: ${data.physicsRewardConfig.effort?.toFixed(3) || 'N/A'}\n`;
-            content += `Weight Velocity (w.vel): ${data.physicsRewardConfig.vel?.toFixed(3) || 'N/A'}\n`;
-            content += `Weight Stable: ${data.physicsRewardConfig.stable?.toFixed(3) || 'N/A'}\n`;
-            content += `Weight Swing (w.swing): ${data.physicsRewardConfig.swing?.toFixed(3) || 'N/A'}\n`;
+            content += `\n--- Reward Weights ---\n`;
+            content += `w0: ${data.physicsRewardConfig.w0?.toFixed(3) || 'N/A'}\n`;
+            content += `w1: ${data.physicsRewardConfig.w1?.toFixed(3) || 'N/A'}\n`;
+            content += `w2: ${data.physicsRewardConfig.w2?.toFixed(3) || 'N/A'}\n`;
+            content += `w3: ${data.physicsRewardConfig.w3?.toFixed(3) || 'N/A'}\n`;
+            content += `w4: ${data.physicsRewardConfig.w4?.toFixed(3) || 'N/A'}\n`;
+            content += `Vp: ${data.physicsRewardConfig.Vp?.toFixed(3) || 'N/A'}\n`;
         }
 
         if (data.lastStepRewardComponents) {
             content += `\n--- Last Step Reward Breakdown ---\n`;
-            content += `Height: ${data.lastStepRewardComponents.rH?.toFixed(3) || 'N/A'}\n`;
-            content += `Cart Pos: ${data.lastStepRewardComponents.rDx?.toFixed(3) || 'N/A'}\n`;
-            content += `Effort: ${data.lastStepRewardComponents.rEffort?.toFixed(3) || 'N/A'}\n`;
-            content += `Velocity: ${data.lastStepRewardComponents.rVel?.toFixed(3) || 'N/A'}\n`;
-            content += `Stability: ${data.lastStepRewardComponents.rStable?.toFixed(3) || 'N/A'}\n`;
-            content += `Swing Assist: ${data.lastStepRewardComponents.rSwing?.toFixed(3) || 'N/A'}\n`;
+            content += `Penalty: ${data.lastStepRewardComponents.penalty?.toFixed(3) || 'N/A'}\n`;
+            content += `Out of Bounds: ${data.lastStepRewardComponents.outOfBounds?.toFixed(3) || 'N/A'}\n`;
         }
 
         if (data.policyDiagnostics) {
