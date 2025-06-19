@@ -119,6 +119,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Update parts of the debug snapshot that come with render_data
                 latestDebugSnapshot.lastAction = payload.action;
                 latestDebugSnapshot.isWarmup = payload.isWarmup;
+                if (payload.policyDiagnostics) latestDebugSnapshot.policyDiagnostics = payload.policyDiagnostics;
                 if (payload.totalSteps !== undefined) latestDebugSnapshot.totalSteps = payload.totalSteps;
                 // Avoid calling updateDebugInfoPanel here for performance, rely on episode_done or other events
                 // Or, if frequent updates are needed, ensure updateDebugInfoPanel is efficient.
@@ -157,8 +158,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Add the new ones from e.data (top level) that are now also sent with episode_done
                 if (e.data.lastStepRewardComponents) latestDebugSnapshot.lastStepRewardComponents = e.data.lastStepRewardComponents;
                 if (e.data.lastAction !== undefined) latestDebugSnapshot.lastAction = e.data.lastAction;
+                if (e.data.policyDiagnostics) latestDebugSnapshot.policyDiagnostics = e.data.policyDiagnostics;
                 if (e.data.terminationReason) latestDebugSnapshot.terminationReason = e.data.terminationReason;
-                if (e.data.agentConfig) latestDebugSnapshot.agentConfig = e.data.agentConfig; 
+                if (e.data.agentConfig) latestDebugSnapshot.agentConfig = e.data.agentConfig;
                 if (e.data.physicsRewardConfig) latestDebugSnapshot.physicsRewardConfig = e.data.physicsRewardConfig;
                 if (episodeSteps !== undefined) latestDebugSnapshot.episodeSteps = episodeSteps;
 
@@ -491,6 +493,14 @@ document.addEventListener('DOMContentLoaded', () => {
             content += `\n--- Last Step Reward Breakdown ---\n`;
             content += `Penalty: ${data.lastStepRewardComponents.penalty?.toFixed(3) || 'N/A'}\n`;
             content += `Out of Bounds: ${data.lastStepRewardComponents.outOfBounds?.toFixed(3) || 'N/A'}\n`;
+        }
+
+        if (data.policyDiagnostics) {
+            content += `\n--- Agent Internals (Current Step) ---\n`;
+            content += `Actor Mean: ${data.policyDiagnostics.actorMean !== undefined && data.policyDiagnostics.actorMean !== null ? data.policyDiagnostics.actorMean.toFixed(3) : 'N/A'}\n`;
+            content += `Actor LogStd: ${data.policyDiagnostics.actorLogStd !== undefined && data.policyDiagnostics.actorLogStd !== null ? data.policyDiagnostics.actorLogStd.toFixed(3) : 'N/A'}\n`;
+            content += `Critic Q1 (for action): ${data.policyDiagnostics.criticQ1 !== undefined && data.policyDiagnostics.criticQ1 !== null ? data.policyDiagnostics.criticQ1.toFixed(3) : 'N/A'}\n`;
+            content += `Critic Q2 (for action): ${data.policyDiagnostics.criticQ2 !== undefined && data.policyDiagnostics.criticQ2 !== null ? data.policyDiagnostics.criticQ2.toFixed(3) : 'N/A'}\n`;
         }
 
 
