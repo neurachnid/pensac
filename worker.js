@@ -142,9 +142,9 @@ class PendulumPhysics {
 
         // Convert internal angles (0 = down) to paper convention (0 = up)
         // then wrap to [-pi, pi] to avoid large penalties
-        const wrap = x => ((x + Math.PI) % (2 * Math.PI)) - Math.PI;
-        const theta1 = wrap(a1 - Math.PI);
-        const theta2 = wrap(a2 - Math.PI);
+        const wrapAngle = angle => ((angle + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+        const theta1 = wrapAngle(a1 - Math.PI);
+        const theta2 = wrapAngle(a2 - Math.PI);
 
         // Reward weights from the reference paper
         const w0 = 0.1;
