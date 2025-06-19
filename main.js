@@ -37,7 +37,7 @@ class PendulumRenderer {
     }
 
     calculatePositions() { if(!this.state) return {}; const {l1_m, l2_m} = this.params; const {a1, a2, cart_x_m} = this.state; if(isNaN(cart_x_m)) return {}; const l1_px = l1_m * this.pixelsPerMeter; const l2_px = l2_m * this.pixelsPerMeter; const px = this.pendulumCanvas.width / 2 + (cart_x_m - this.camera_x_m) * this.pixelsPerMeter; const x1 = px + l1_px * Math.sin(a1); const y1 = this.py + l1_px * Math.cos(a1); const x2 = x1 + l2_px * Math.sin(a2); const y2 = y1 + l2_px * Math.cos(a2); return {x1, y1, x2, y2, px}; }
-    render() { this.updateCamera(1/60); this.draw(); }
+    render() { this.updateCamera(1/50); this.draw(); }
     resizeAndResetCanvas() { const container = document.getElementById('simulation-container'); const containerWidth = container.clientWidth; const totalLengthMeters = this.params.l1_m + this.params.l2_m; const fullDrawableHeight = 600; this.pixelsPerMeter = (totalLengthMeters > 0) ? (fullDrawableHeight / (totalLengthMeters * 2.2)) : 100; this.py = fullDrawableHeight / 2; container.style.height = (fullDrawableHeight) + 'px'; this.pendulumCanvas.height = fullDrawableHeight; this.pendulumCanvas.width = containerWidth; this.traceCanvas.height = fullDrawableHeight; this.traceCanvas.width = containerWidth; this.drawGrid(); this.draw(); }
     draw() { 
         this.p_ctx.clearRect(0, 0, this.pendulumCanvas.width, this.pendulumCanvas.height); 
@@ -143,11 +143,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 break;
                 
             case 'episode_done':
-                const { 
-                    totalReward, episode, bestReward, avgReward, 
-                    totalSteps, bufferSize, mode,
+                const {
+                    totalReward, episode, bestReward, avgReward,
+                    totalSteps, bufferSize, mode, episodeSteps,
                     // Removed trainingLosses, agentConfig, physicsRewardConfig from payload destructuring
-                    currentSpeed 
+                    currentSpeed
                 } = payload; // payload is e.data.payload
 
                 // Store all data for the debug panel
@@ -161,7 +161,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (e.data.policyDiagnostics) latestDebugSnapshot.policyDiagnostics = e.data.policyDiagnostics;
                 if (e.data.terminationReason) latestDebugSnapshot.terminationReason = e.data.terminationReason;
                 if (e.data.agentConfig) latestDebugSnapshot.agentConfig = e.data.agentConfig; 
-                if (e.data.physicsRewardConfig) latestDebugSnapshot.physicsRewardConfig = e.data.physicsRewardConfig; 
+                if (e.data.physicsRewardConfig) latestDebugSnapshot.physicsRewardConfig = e.data.physicsRewardConfig;
+                if (episodeSteps !== undefined) latestDebugSnapshot.episodeSteps = episodeSteps;
 
                 // Update stats
                 document.getElementById('episode-counter').textContent = episode;
@@ -176,7 +177,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 
                 if (bufferSize !== undefined) {
                     document.getElementById('buffer-size').textContent = bufferSize.toLocaleString();
-                    const bufferProgress = `${bufferSize.toLocaleString()}/100K`;
+                    const bufferProgress = `${bufferSize.toLocaleString()}/1M`;
                     document.getElementById('buffer-progress').textContent = bufferProgress;
                 }
                 
@@ -430,6 +431,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (data.terminationReason && data.terminationReason !== 'Running') content += `Last Termination: ${data.terminationReason}\n`;
         content += `Episode: ${data.episode || 0}\n`;
+        if (data.episodeSteps !== undefined) content += `Episode Length: ${data.episodeSteps} steps\n`;
         content += `Total Steps: ${(data.totalSteps || 0).toLocaleString()}\n`;
         content += `Actual Sim Speed: ${data.sps || '-'} SPS\n`;
         content += `Sim Speed: x${data.currentSpeed || speedSlider.value || 1}\n`;
@@ -738,7 +740,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Reset agent-specific UI elements
         document.getElementById('buffer-size').textContent = '0';
         document.getElementById('total-steps').textContent = '0';
-        document.getElementById('buffer-progress').textContent = '0/100K';
+        document.getElementById('buffer-progress').textContent = '0/1M';
         document.getElementById('training-status').textContent = 'Warming up...';
         document.getElementById('currentMode').textContent = 'IDLE'; // More accurate for reset state
         document.getElementById('agentState').textContent = 'Ready'; // Or 'Reset'
