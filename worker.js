@@ -47,6 +47,8 @@ class PendulumPhysics {
         this.state = this.wasmInstance.get_state_js();   // Get initial state from Wasm
         // The paper applies forces in the range [-15, 15] N
         this.actionMax = 15.0;
+        // Track limit used for out of bounds penalty (meters)
+        this.trackLimit = 2.4;
         this.maxSteps = 1000;
         this.currentStep = 0;
         // Base reward weights (initial values)
@@ -107,11 +109,9 @@ class PendulumPhysics {
             done = !physics_ok;
             if (done) this.lastTerminationReason = 'Physics Unstable (Observe Mode)';
         } else { // TRAINING or other modes
-            // Episode ends if physics unstable, cart off track, or max steps reached.
+            // Episode ends only if physics unstable or max steps reached.
             if (!physics_ok) {
                 done = true; this.lastTerminationReason = 'Physics Unstable';
-            } else if (Math.abs(this.state.cart_x_m) > 2.4) {
-                done = true; this.lastTerminationReason = 'Cart Out of Bounds';
             } else if (this.currentStep >= this.maxSteps) {
                 done = true; this.lastTerminationReason = 'Max Episode Steps Reached';
             } else {
@@ -148,7 +148,7 @@ class PendulumPhysics {
                         w3 * cart_x_m * cart_x_m +
                         w4 * (action * action);
 
-        const F = Math.abs(cart_x_m) > 2.4 ? 1.0 : 0.0;
+        const F = Math.abs(cart_x_m) > this.trackLimit ? 1.0 : 0.0;
 
         const r = -w0 * penalty - Vp * F;
 
@@ -305,7 +305,8 @@ class DDPGAgent {
         const nextStates = tf.tensor(b.nextStates);
         const dones = tf.tensor(b.dones);
 
-        const criticLossTensor = this.criticOptimizer.minimize(() => {
+        const criticVars = this.critic.trainableWeights.map(w => w.val);
+        const criticGradsObj = tf.variableGrads(() => {
             const nextActions = this.targetActor.predict(nextStates);
             const qNext = this.targetCritic.predict([nextStates, nextActions]).reshape([this.batchSize]);
             const y = rewards.reshape([this.batchSize]).add(
@@ -313,18 +314,30 @@ class DDPGAgent {
             );
             const q = this.critic.predict([states, actions]).reshape([this.batchSize]);
             return tf.losses.meanSquaredError(y, q);
-        }, true);
+        }, criticVars);
+        this.criticOptimizer.applyGradients(criticGradsObj.grads);
 
-        const actorLossTensor = this.actorOptimizer.minimize(() => {
+        let criticGradNorm = 0;
+        for (const g of Object.values(criticGradsObj.grads)) {
+            criticGradNorm += g.norm().dataSync()[0];
+        }
+        const criticLoss = criticGradsObj.value.dataSync()[0];
+
+        const actorVars = this.actor.trainableWeights.map(w => w.val);
+        const actorGradsObj = tf.variableGrads(() => {
             const act = this.actor.predict(states);
             const qVal = this.critic.predict([states, act]).reshape([this.batchSize]);
             return tf.neg(tf.mean(qVal));
-        }, true);
+        }, actorVars);
+        this.actorOptimizer.applyGradients(actorGradsObj.grads);
+
+        let actorGradNorm = 0;
+        for (const g of Object.values(actorGradsObj.grads)) {
+            actorGradNorm += g.norm().dataSync()[0];
+        }
+        const actorLoss = actorGradsObj.value.dataSync()[0];
 
         this.updateTargetNetworks(this.tau);
-
-        const criticLoss = criticLossTensor ? criticLossTensor.dataSync()[0] : 0;
-        const actorLoss = actorLossTensor ? actorLossTensor.dataSync()[0] : 0;
 
         // Dispose tensors to prevent memory leaks
         states.dispose();
@@ -332,10 +345,12 @@ class DDPGAgent {
         rewards.dispose();
         nextStates.dispose();
         dones.dispose();
-        if (criticLossTensor) criticLossTensor.dispose();
-        if (actorLossTensor) actorLossTensor.dispose();
+        for (const g of Object.values(criticGradsObj.grads)) g.dispose();
+        for (const g of Object.values(actorGradsObj.grads)) g.dispose();
+        criticGradsObj.value.dispose();
+        actorGradsObj.value.dispose();
 
-        return {criticLoss, actorLoss};
+        return {criticLoss, actorLoss, criticGradNorm, actorGradNorm};
     }
 
     updateTargetNetworks(tau) {
@@ -551,7 +566,6 @@ function simulationStep() {
             lastStepRewardComponents: physics.getRewardComponents(),
             // Send the action and diagnostics for the step that ended the episode
             lastAction: latestAction, 
-            policyDiagnostics: lastPolicyDiagnostics,
             terminationReason: physics.getTerminationReason(),
             agentConfig: {
                 actorLr: agent.actorLr,
@@ -682,7 +696,6 @@ function runSimulationLoop() {
                     params: physics.params,
                     action: isValidNumber(latestAction) ? latestAction : 0,
                     totalSteps: (simulationMode === 'TRAINING' && !isObservingPolicyWhileTrainingPaused) ? totalSteps : undefined,
-                    policyDiagnostics: lastPolicyDiagnostics, // Add policy diagnostics
                     isWarmup: simulationMode === 'TRAINING' && totalSteps < AGENT_WARMUP_STEPS // Use agent's warmup
                 } 
             });
