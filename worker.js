@@ -47,6 +47,8 @@ class PendulumPhysics {
         this.state = this.wasmInstance.get_state_js();   // Get initial state from Wasm
         // The paper applies forces in the range [-15, 15] N
         this.actionMax = 15.0;
+        // Track limit used for out of bounds penalty (meters)
+        this.trackLimit = 2.4;
         this.maxSteps = 1000;
         this.currentStep = 0;
         // Base reward weights (initial values)
@@ -107,11 +109,9 @@ class PendulumPhysics {
             done = !physics_ok;
             if (done) this.lastTerminationReason = 'Physics Unstable (Observe Mode)';
         } else { // TRAINING or other modes
-            // Episode ends if physics unstable, cart off track, or max steps reached.
+            // Episode ends only if physics unstable or max steps reached.
             if (!physics_ok) {
                 done = true; this.lastTerminationReason = 'Physics Unstable';
-            } else if (Math.abs(this.state.cart_x_m) > 2.4) {
-                done = true; this.lastTerminationReason = 'Cart Out of Bounds';
             } else if (this.currentStep >= this.maxSteps) {
                 done = true; this.lastTerminationReason = 'Max Episode Steps Reached';
             } else {
@@ -148,7 +148,7 @@ class PendulumPhysics {
                         w3 * cart_x_m * cart_x_m +
                         w4 * (action * action);
 
-        const F = Math.abs(cart_x_m) > 2.4 ? 1.0 : 0.0;
+        const F = Math.abs(cart_x_m) > this.trackLimit ? 1.0 : 0.0;
 
         const r = -w0 * penalty - Vp * F;
 
