@@ -119,7 +119,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Update parts of the debug snapshot that come with render_data
                 latestDebugSnapshot.lastAction = payload.action;
                 latestDebugSnapshot.isWarmup = payload.isWarmup;
-                if (payload.policyDiagnostics) latestDebugSnapshot.policyDiagnostics = payload.policyDiagnostics;
                 if (payload.totalSteps !== undefined) latestDebugSnapshot.totalSteps = payload.totalSteps;
                 // Avoid calling updateDebugInfoPanel here for performance, rely on episode_done or other events
                 // Or, if frequent updates are needed, ensure updateDebugInfoPanel is efficient.
@@ -158,7 +157,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Add the new ones from e.data (top level) that are now also sent with episode_done
                 if (e.data.lastStepRewardComponents) latestDebugSnapshot.lastStepRewardComponents = e.data.lastStepRewardComponents;
                 if (e.data.lastAction !== undefined) latestDebugSnapshot.lastAction = e.data.lastAction;
-                if (e.data.policyDiagnostics) latestDebugSnapshot.policyDiagnostics = e.data.policyDiagnostics;
                 if (e.data.terminationReason) latestDebugSnapshot.terminationReason = e.data.terminationReason;
                 if (e.data.agentConfig) latestDebugSnapshot.agentConfig = e.data.agentConfig; 
                 if (e.data.physicsRewardConfig) latestDebugSnapshot.physicsRewardConfig = e.data.physicsRewardConfig;
@@ -446,7 +444,12 @@ document.addEventListener('DOMContentLoaded', () => {
             content += `\n--- Last Training Batch ---\n`;
             content += `Actor Loss: ${latestDebugSnapshot.trainingLosses.actorLoss?.toFixed(4) || 'N/A'}\n`;
             content += `Critic Loss: ${latestDebugSnapshot.trainingLosses.criticLoss?.toFixed(4) || 'N/A'}\n`;
-            content += `Avg Policy LogProb: ${latestDebugSnapshot.trainingLosses.avgLogProb?.toFixed(4) || 'N/A'}\n`;
+            if (latestDebugSnapshot.trainingLosses.actorGradNorm !== undefined) {
+                content += `Actor Grad Norm: ${latestDebugSnapshot.trainingLosses.actorGradNorm.toFixed(4)}\n`;
+            }
+            if (latestDebugSnapshot.trainingLosses.criticGradNorm !== undefined) {
+                content += `Critic Grad Norm: ${latestDebugSnapshot.trainingLosses.criticGradNorm.toFixed(4)}\n`;
+            }
         }
 
         if (data.agentConfig) {
@@ -490,13 +493,6 @@ document.addEventListener('DOMContentLoaded', () => {
             content += `Out of Bounds: ${data.lastStepRewardComponents.outOfBounds?.toFixed(3) || 'N/A'}\n`;
         }
 
-        if (data.policyDiagnostics) {
-            content += `\n--- Agent Internals (Current Step) ---\n`;
-            content += `Actor Mean: ${data.policyDiagnostics.actorMean?.toFixed(4) || 'N/A'}\n`;
-            content += `Actor LogStd: ${data.policyDiagnostics.actorLogStd?.toFixed(4) || 'N/A'}\n`;
-            content += `Critic Q1 (for action): ${data.policyDiagnostics.q1Value?.toFixed(4) || 'N/A'}\n`;
-            content += `Critic Q2 (for action): ${data.policyDiagnostics.q2Value?.toFixed(4) || 'N/A'}\n`;
-        }
 
         content += `\n--- UI & System ---\n`;
         content += `Last Action Sent (norm): ${data.lastAction?.toFixed(3) || 'N/A'}\n`;

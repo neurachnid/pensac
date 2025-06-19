@@ -305,7 +305,8 @@ class DDPGAgent {
         const nextStates = tf.tensor(b.nextStates);
         const dones = tf.tensor(b.dones);
 
-        const criticLossTensor = this.criticOptimizer.minimize(() => {
+        const criticVars = this.critic.trainableWeights.map(w => w.val);
+        const criticGradsObj = tf.variableGrads(() => {
             const nextActions = this.targetActor.predict(nextStates);
             const qNext = this.targetCritic.predict([nextStates, nextActions]).reshape([this.batchSize]);
             const y = rewards.reshape([this.batchSize]).add(
@@ -313,18 +314,30 @@ class DDPGAgent {
             );
             const q = this.critic.predict([states, actions]).reshape([this.batchSize]);
             return tf.losses.meanSquaredError(y, q);
-        }, true);
+        }, criticVars);
+        this.criticOptimizer.applyGradients(criticGradsObj.grads);
 
-        const actorLossTensor = this.actorOptimizer.minimize(() => {
+        let criticGradNorm = 0;
+        for (const g of Object.values(criticGradsObj.grads)) {
+            criticGradNorm += g.norm().dataSync()[0];
+        }
+        const criticLoss = criticGradsObj.value.dataSync()[0];
+
+        const actorVars = this.actor.trainableWeights.map(w => w.val);
+        const actorGradsObj = tf.variableGrads(() => {
             const act = this.actor.predict(states);
             const qVal = this.critic.predict([states, act]).reshape([this.batchSize]);
             return tf.neg(tf.mean(qVal));
-        }, true);
+        }, actorVars);
+        this.actorOptimizer.applyGradients(actorGradsObj.grads);
+
+        let actorGradNorm = 0;
+        for (const g of Object.values(actorGradsObj.grads)) {
+            actorGradNorm += g.norm().dataSync()[0];
+        }
+        const actorLoss = actorGradsObj.value.dataSync()[0];
 
         this.updateTargetNetworks(this.tau);
-
-        const criticLoss = criticLossTensor ? criticLossTensor.dataSync()[0] : 0;
-        const actorLoss = actorLossTensor ? actorLossTensor.dataSync()[0] : 0;
 
         // Dispose tensors to prevent memory leaks
         states.dispose();
@@ -332,10 +345,12 @@ class DDPGAgent {
         rewards.dispose();
         nextStates.dispose();
         dones.dispose();
-        if (criticLossTensor) criticLossTensor.dispose();
-        if (actorLossTensor) actorLossTensor.dispose();
+        for (const g of Object.values(criticGradsObj.grads)) g.dispose();
+        for (const g of Object.values(actorGradsObj.grads)) g.dispose();
+        criticGradsObj.value.dispose();
+        actorGradsObj.value.dispose();
 
-        return {criticLoss, actorLoss};
+        return {criticLoss, actorLoss, criticGradNorm, actorGradNorm};
     }
 
     updateTargetNetworks(tau) {
@@ -551,7 +566,6 @@ function simulationStep() {
             lastStepRewardComponents: physics.getRewardComponents(),
             // Send the action and diagnostics for the step that ended the episode
             lastAction: latestAction, 
-            policyDiagnostics: lastPolicyDiagnostics,
             terminationReason: physics.getTerminationReason(),
             agentConfig: {
                 actorLr: agent.actorLr,
@@ -682,7 +696,6 @@ function runSimulationLoop() {
                     params: physics.params,
                     action: isValidNumber(latestAction) ? latestAction : 0,
                     totalSteps: (simulationMode === 'TRAINING' && !isObservingPolicyWhileTrainingPaused) ? totalSteps : undefined,
-                    policyDiagnostics: lastPolicyDiagnostics, // Add policy diagnostics
                     isWarmup: simulationMode === 'TRAINING' && totalSteps < AGENT_WARMUP_STEPS // Use agent's warmup
                 } 
             });
