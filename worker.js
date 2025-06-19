@@ -90,7 +90,7 @@ class PendulumPhysics {
         PendulumPhysics.totalSteps = (PendulumPhysics.totalSteps || 0) + 1;
         
         // Call Wasm for physics update
-        const dt = 1/60;
+        const dt = 0.02; // 50 Hz physics timestep
         const physics_ok = this.wasmInstance.update_physics_step(dt, action, currentSimulationMode === 'OBSERVING');
         this.state = this.wasmInstance.get_state_js(); // Update JS state from Wasm
 
@@ -122,112 +122,39 @@ class PendulumPhysics {
     }
 
     calculateReward(action) {
-        const { a1, a2, a1_v, a2_v, cart_x_m } = this.state;
-        const { l1_m, l2_m } = this.params;
+        const { a1, a2, cart_x_m } = this.state;
 
-        // === 0. Sanity-check ===
-        const varsToCheck = [a1, a2, a1_v, a2_v, cart_x_m, action];
+        // Check for valid numbers
+        const varsToCheck = [a1, a2, cart_x_m, action];
         if (varsToCheck.some(v => !isFinite(v) || isNaN(v))) {
             console.warn('NaN/Inf in reward inputs', varsToCheck);
-            return -10; // harsh penalty for invalid state
+            return -10;
         }
 
-        // === 1. Keep a global step counter so we can anneal shaping terms ===
-        if (typeof PendulumPhysics.totalSteps === 'undefined') {
-            PendulumPhysics.totalSteps = 0;
-        }
-        const globalStep = PendulumPhysics.totalSteps;
+        // Convert internal angles (0 = down) to paper convention (0 = up)
+        const theta1 = a1 - Math.PI;
+        const theta2 = a2 - Math.PI;
 
-        // === 2. Core features ===
-        const cos_a1 = Math.cos(a1);
-        const cos_a2 = Math.cos(a2);
+        // Reward weights from the reference paper
+        const w0 = 0.1;
+        const w1 = 5.0;
+        const w2 = 5.0;
+        const w3 = 1.0;
+        const w4 = 0.05;
+        const Vp = 100.0;
 
-        // 2.1  Height of pole-2 tip (normalised 0→2).
-        //      Upright → high reward; hanging ↓ low reward.
-        const heightTip2 =
-            (l1_m * (1 - cos_a1) + l2_m * (1 - cos_a2)) / (l1_m + l2_m); // 0→2
+        const penalty = w1 * theta1 * theta1 +
+                        w2 * theta2 * theta2 +
+                        w3 * cart_x_m * cart_x_m +
+                        w4 * (action * action);
 
-        // 2.2  Cart displacement (centre of rail at 0).
-        // Termination occurs if |cart_x_m| > 2.4
-        const TRACK_HALF = 2.4;
-        const cartPenalty = (cart_x_m / TRACK_HALF) ** 2; // Quadratic penalty: 0 @ centre, 1 @ rail end
+        const F = Math.abs(cart_x_m) > 2.4 ? 1.0 : 0.0;
 
-        // 2.3  Effort penalty – square of commanded force, scaled to [0,1].
-        const effort = (action / this.actionMax) ** 2; // ∈ [0,1]
+        const r = -w0 * penalty - Vp * F;
 
-        // 2.4  Residual wobble (angular velocity).
-        const velPenalty = (a1_v * a1_v + a2_v * a2_v);
+        this.lastRewardComponents = { penalty: -w0 * penalty, outOfBounds: -Vp * F };
+        this.effectiveRewardWeights = { w0, w1, w2, w3, w4, Vp };
 
-        // 2.5  Stability bonus (tiny but crisp signal once balanced).
-        const STABLE_ANGLE = 12 * Math.PI / 180; // 12°
-        const STABLE_CART  = 0.2; // m
-        const isStable =
-            (Math.abs(a1 - Math.PI) < STABLE_ANGLE) &&
-            (Math.abs(a2 - Math.PI) < STABLE_ANGLE) &&
-            (Math.abs(cart_x_m)    < STABLE_CART) ? 1 : 0;
-
-        // === 3. Coefficients w/ annealing for height shaping ===
-        // Calculate annealed weights for this step based on baseRewardWeights
-        let currentH = this.baseRewardWeights.H;
-        const ANNEAL_START   = 500000; // Start annealing H much later
-        const ANNEAL_PERIOD  = 100000; // Anneal H over a longer period
-        const DECAY          = 0.95;   // Slower decay rate for H
-
-        // Anneal height shaping every ANNEAL_PERIOD env steps (min 1).
-        if (globalStep > ANNEAL_START) {
-            const numAnnealingPeriods = Math.floor((globalStep - ANNEAL_START) / ANNEAL_PERIOD);
-            currentH = this.baseRewardWeights.H * Math.pow(DECAY, numAnnealingPeriods);
-            currentH = Math.max(1.0, currentH); // Ensure H doesn't go too low
-        }
-
-        let currentVelWeight = this.baseRewardWeights.vel; // Base velocity damping
-        // Increase velocity damping if pendulums are mostly upright
-        if (cos_a1 < -0.8 || cos_a2 < -0.8) { // cos(angle) is negative when up
-            currentVelWeight += 0.05; 
-        }
-
-        // Update effectiveRewardWeights for logging/external access
-        this.effectiveRewardWeights.H = currentH;
-        this.effectiveRewardWeights.vel = currentVelWeight;
-        this.effectiveRewardWeights.dx = this.baseRewardWeights.dx;
-        this.effectiveRewardWeights.effort = this.baseRewardWeights.effort;
-        this.effectiveRewardWeights.stable = this.baseRewardWeights.stable;
-
-        // Dynamically scale swing assistance: taper off once both pendulums are nearly upright
-        let swingWeight = this.baseRewardWeights.swing;
-        if (cos_a1 < -0.8 && cos_a2 < -0.8) {
-            swingWeight *= 0.2; // reduce swing assistance near upright
-        }
-        this.effectiveRewardWeights.swing = swingWeight;
-
-        // === 3.5 Swing-up assistance reward ===
-        // Reward for actions that contribute to swinging the pendulums up
-        // action is normalized [-1, 1]. a1_v, a2_v are angular velocities.
-        // cos(a1) > 0.1 means pendulum 1 is in the lower half (a1=0 is down)
-        let swing_assist_reward = 0;
-        if (cos_a1 > 0.1) { swing_assist_reward += swingWeight * action * a1_v * cos_a1; }
-        if (cos_a2 > 0.1) { swing_assist_reward += swingWeight * action * a2_v * cos_a2; }
-
-
-        // === 4. Compose reward ===
-        const rH = this.effectiveRewardWeights.H * heightTip2;
-        const rDx = -this.effectiveRewardWeights.dx * cartPenalty;
-        const rEffort = -this.effectiveRewardWeights.effort * effort;
-        const rVel = -this.effectiveRewardWeights.vel * velPenalty;
-        const rStable = this.effectiveRewardWeights.stable * isStable;
-        // swing_assist_reward is already calculated with its weight
-
-        this.lastRewardComponents = {
-            rH, rDx, rEffort, rVel, rStable, rSwing: swing_assist_reward
-        };
-
-        let r = rH + rDx + rEffort + rVel + rStable + swing_assist_reward;
-
-
-
-
-        // Clip to keep numerical range tame.
-        r = Math.max(-50, Math.min(50, r));
         return r;
     }
 
@@ -271,7 +198,7 @@ class DDPGAgent {
         this.gamma = 0.99;
         this.tau = 0.005;
         this.batchSize = 256;
-        this.bufferSize = 100000;
+        this.bufferSize = 1000000; // Replay buffer of 1M transitions
         this.warmupSteps = AGENT_WARMUP_STEPS; // keep in sync with constant
 
         this.replayBuffer = [];
@@ -457,7 +384,7 @@ let lastSpsCheckTime = 0;
 let stepsSinceLastSpsCheck = 0;
 // const WARMUP_STEPS = 1000; // This is superseded by AGENT_WARMUP_STEPS for agent logic
 const TRAIN_FREQUENCY = 1; // Train after every block of userSetStepsPerFrame steps if slider is >=1x
-const MAX_EPISODE_STEPS = 2000; // Longer episodes
+const MAX_EPISODE_STEPS = 1000; // Match reference paper
 const AGENT_WARMUP_STEPS = 1000; // Should match agent.warmupSteps
 // DEBUGGING HELPERS - Add comprehensive NaN detection
 function isValidNumber(value) {
@@ -699,9 +626,9 @@ function runSimulationLoop() {
             stepsSinceLastSpsCheck = 0;
         }
     } else if (isEffectivelyObserving) {
-        // For observing mode, SPS is roughly 60 due to setTimeout aiming for ~16.6ms per frame (and 1 step per frame)
+        // For observing mode, SPS is roughly 50 due to setTimeout aiming for ~20ms per frame (and 1 step per frame)
         if (now - lastSpsCheckTime >= 990) {
-            self.postMessage({ type: 'sps_update', payload: { sps: (1 * 60).toFixed(0) } }); // Approx 60 SPS
+            self.postMessage({ type: 'sps_update', payload: { sps: (1 * 50).toFixed(0) } }); // Approx 50 SPS
             lastSpsCheckTime = now;
         }
     }
@@ -762,8 +689,8 @@ function runSimulationLoop() {
 
     // Pace the simulation loop
     if (isEffectivelyObserving) {
-        // Aim for roughly 60 physics steps per second to match dt = 1/60s for real-time playback
-        setTimeout(runSimulation, 1000 / 60); 
+        // Aim for roughly 50 physics steps per second to match dt = 0.02s for real-time playback
+        setTimeout(runSimulation, 1000 / 50);
     } else {
         // For training or other modes, run as fast as possible to maximize throughput
         setTimeout(runSimulation, 0);
@@ -814,7 +741,7 @@ self.onmessage = function(e) {
                 allowRender = true;
                 lastSpsCheckTime = performance.now(); // Reset SPS counters
                 stepsSinceLastSpsCheck = 0;
-                self.postMessage({ type: 'sps_update', payload: { sps: (60).toFixed(0) } }); // Initial SPS for observe
+                self.postMessage({ type: 'sps_update', payload: { sps: (50).toFixed(0) } }); // Initial SPS for observe
                 self.postMessage({ type: 'observation_started', payload: { status: 'Observation Mode Active' } });
                 // Ensure loop runs if it was IDLE or PAUSED from a non-running state
                 if (previousSimulationMode === 'IDLE' || (isPaused && !isObservingPolicyWhileTrainingPaused)) runSimulationLoop();
