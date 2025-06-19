@@ -534,14 +534,15 @@ function simulationStep() {
         // Validate avgReward
         const validAvgReward = isValidNumber(avgReward) ? avgReward : totalReward;
         
-        self.postMessage({ 
-            type: 'episode_done', 
-            payload: { 
-                episode, 
-                totalReward, 
+        self.postMessage({
+            type: 'episode_done',
+            payload: {
+                episode,
+                totalReward,
                 bestReward,
                 avgReward: validAvgReward,
                 totalSteps: simulationMode === 'TRAINING' ? totalSteps : undefined,
+                episodeSteps: physics.currentStep,
                 mode: isObservingPolicyWhileTrainingPaused ? 'TRAINING_PAUSED_OBSERVING' : simulationMode,
                 bufferSize: agent.replayBuffer.length
             },

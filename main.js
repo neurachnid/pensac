@@ -143,11 +143,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 break;
                 
             case 'episode_done':
-                const { 
-                    totalReward, episode, bestReward, avgReward, 
-                    totalSteps, bufferSize, mode,
+                const {
+                    totalReward, episode, bestReward, avgReward,
+                    totalSteps, bufferSize, mode, episodeSteps,
                     // Removed trainingLosses, agentConfig, physicsRewardConfig from payload destructuring
-                    currentSpeed 
+                    currentSpeed
                 } = payload; // payload is e.data.payload
 
                 // Store all data for the debug panel
@@ -161,7 +161,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (e.data.policyDiagnostics) latestDebugSnapshot.policyDiagnostics = e.data.policyDiagnostics;
                 if (e.data.terminationReason) latestDebugSnapshot.terminationReason = e.data.terminationReason;
                 if (e.data.agentConfig) latestDebugSnapshot.agentConfig = e.data.agentConfig; 
-                if (e.data.physicsRewardConfig) latestDebugSnapshot.physicsRewardConfig = e.data.physicsRewardConfig; 
+                if (e.data.physicsRewardConfig) latestDebugSnapshot.physicsRewardConfig = e.data.physicsRewardConfig;
+                if (episodeSteps !== undefined) latestDebugSnapshot.episodeSteps = episodeSteps;
 
                 // Update stats
                 document.getElementById('episode-counter').textContent = episode;
@@ -430,6 +431,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (data.terminationReason && data.terminationReason !== 'Running') content += `Last Termination: ${data.terminationReason}\n`;
         content += `Episode: ${data.episode || 0}\n`;
+        if (data.episodeSteps !== undefined) content += `Episode Length: ${data.episodeSteps} steps\n`;
         content += `Total Steps: ${(data.totalSteps || 0).toLocaleString()}\n`;
         content += `Actual Sim Speed: ${data.sps || '-'} SPS\n`;
         content += `Sim Speed: x${data.currentSpeed || speedSlider.value || 1}\n`;
