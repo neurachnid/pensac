@@ -344,8 +344,9 @@ class DDPGAgent {
             const sw = source.getWeights();
             const newW = sw.map((w, i) => tf.tidy(() => w.mul(tau).add(tw[i].mul(1 - tau))));
             target.setWeights(newW);
-            tf.dispose(tw);
-            tf.dispose(sw);
+            // Dispose only the temporary tensors created in newW.
+            // The arrays from getWeights() (tw, sw) contain the model's
+            // actual weight variables and should **not** be disposed here.
             tf.dispose(newW);
         };
         updateTarget(this.targetActor, this.actor);
