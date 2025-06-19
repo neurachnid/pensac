@@ -70,7 +70,16 @@ class PendulumPhysics {
 
     getStateArray() {
         const s = this.state;
-        return [s.cart_x_m, s.cart_x_v_m, Math.cos(s.a1), Math.sin(s.a1), s.a1_v, Math.cos(s.a2), Math.sin(s.a2), s.a2_v];
+        return [
+            s.cart_x_m,
+            s.cart_x_v_m,
+            Math.sin(s.a1),
+            Math.cos(s.a1),
+            s.a1_v,
+            Math.sin(s.a2),
+            Math.cos(s.a2),
+            s.a2_v
+        ];
     }
 
     getEffectiveRewardWeights() {
