@@ -3,13 +3,29 @@
 // Use importScripts because tf.js provides a UMD build
 self.importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js');
 self.importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.js');
-// Import the JS glue code for your Wasm physics module
-import initWasm, { WasmPendulumPhysics } from './pkg_physics/physics_engine.js';
+
+// Dynamically import the Wasm physics module
+let initWasm, WasmPendulumPhysics;
+async function loadPhysicsModule() {
+    try {
+        const moduleUrl = new URL('./pkg_physics/physics_engine.js', self.location).href;
+        const mod = await import(moduleUrl);
+        initWasm = mod.default;
+        WasmPendulumPhysics = mod.WasmPendulumPhysics;
+    } catch (err) {
+        self.postMessage({ type: 'worker_error', payload: { message: 'Failed to load physics module', error: err.message } });
+        throw err;
+    }
+}
 
 // Enhanced TensorFlow.js Configuration for Performance
 async function configureTensorFlowJS() {
+    // Dynamically load the Wasm module if not already loaded
+    if (!initWasm) {
+        await loadPhysicsModule();
+    }
     // Initialize Wasm module built with wasm-bindgen
-    await initWasm('./pkg_physics/physics_engine_bg.wasm');
+    await initWasm(new URL('./pkg_physics/physics_engine_bg.wasm', self.location).href);
 
     // Configure TensorFlow.js to use the WebAssembly backend if available
     try {
@@ -35,6 +51,16 @@ async function configureTensorFlowJS() {
 
 // Call configuration immediately and keep the promise so we can await it later
 const tfReadyPromise = configureTensorFlowJS();
+
+// Forward unexpected errors to the main thread for easier debugging
+self.addEventListener('error', (e) => {
+    self.postMessage({ type: 'worker_error', payload: { message: e.message } });
+});
+
+self.addEventListener('unhandledrejection', (e) => {
+    const msg = e.reason && e.reason.message ? e.reason.message : String(e.reason);
+    self.postMessage({ type: 'worker_error', payload: { message: msg } });
+});
 
 // --- Environment Physics (moved to worker) ---
 class PendulumPhysics {
