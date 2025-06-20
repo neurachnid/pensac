@@ -26,7 +26,7 @@ async function configureTensorFlowJS() {
     tf.env().set('WEBGL_PACK', true);
     tf.env().set('WEBGL_FORCE_F16_TEXTURES', true);
     tf.env().set('WEBGL_RENDER_FLOAT32_CAPABLE', true);
-    
+
     console.log('TensorFlow.js optimized backend:', tf.getBackend());
     console.log('Physics Wasm module loaded.');
     console.log('Memory info:', tf.memory());
