@@ -93,6 +93,7 @@ impl WasmPendulumPhysics {
 
     // Core physics update, returns true if successful
     pub fn update_physics_step(&mut self, dt: f64, force_override: f64, simulation_mode_is_observing: bool) -> bool {
+        if !is_valid_num(dt, "dt") || dt <= 0.0 { return false; }
         if !is_valid_num(force_override, "force_override") { return false; }
 
         let fx = force_override;
