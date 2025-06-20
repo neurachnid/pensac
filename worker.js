@@ -1,19 +1,31 @@
 // This script runs in a separate thread.
 // Import TensorFlow.js library within the worker
 self.importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js');
+// Load the TensorFlow.js WebAssembly backend
+self.importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.js');
 // Import the JS glue code for your Wasm physics module
 self.importScripts('./pkg_physics/physics_engine.js'); // Path to wasm-pack output
 
 // Enhanced TensorFlow.js Configuration for Performance
 async function configureTensorFlowJS() {
-    // Enable WebGL backend for better performance
     // Initialize Wasm module (wasm-pack generated)
     // For --target no-modules, wasm_bindgen becomes a global function.
     // self.wasm_bindgen or just wasm_bindgen should work.
     // Pass an object with the module path to satisfy the newer init pattern.
     await wasm_bindgen({ module_or_path: './pkg_physics/physics_engine_bg.wasm' });
-    await tf.setBackend('webgl');
-    
+
+    // Configure TensorFlow.js to use the WebAssembly backend if available
+    try {
+        if (tf && tf.wasm && tf.wasm.setWasmPaths) {
+            tf.wasm.setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/');
+        }
+        await tf.setBackend('wasm');
+        await tf.ready();
+    } catch (err) {
+        console.warn('WASM backend failed, falling back to WebGL:', err);
+        await tf.setBackend('webgl');
+    }
+
     // Configure memory management
     tf.env().set('WEBGL_PACK', true);
     tf.env().set('WEBGL_FORCE_F16_TEXTURES', true);
