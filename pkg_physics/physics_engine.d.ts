@@ -1,40 +1,37 @@
-declare namespace wasm_bindgen {
-	/* tslint:disable */
-	/* eslint-disable */
-	export class PhysicsParams {
-	  private constructor();
-	  free(): void;
-	  cart_m: number;
-	  m1: number;
-	  m2: number;
-	  l1_m: number;
-	  l2_m: number;
-	  g: number;
-	}
-	export class PhysicsState {
-	  private constructor();
-	  free(): void;
-	  a1: number;
-	  a2: number;
-	  a1_v: number;
-	  a2_v: number;
-	  cart_x_m: number;
-	  cart_x_v_m: number;
-	}
-	export class WasmPendulumPhysics {
-	  free(): void;
-	  constructor(cart_m: number, m1: number, m2: number, l1_m: number, l2_m: number, g: number);
-	  reset(): void;
-	  get_state_js(): any;
-	  get_params_js(): any;
-	  update_physics_step(dt: number, force_override: number, simulation_mode_is_observing: boolean): boolean;
-	}
-	
+/* tslint:disable */
+/* eslint-disable */
+export class PhysicsParams {
+  private constructor();
+  free(): void;
+  cart_m: number;
+  m1: number;
+  m2: number;
+  l1_m: number;
+  l2_m: number;
+  g: number;
+}
+export class PhysicsState {
+  private constructor();
+  free(): void;
+  a1: number;
+  a2: number;
+  a1_v: number;
+  a2_v: number;
+  cart_x_m: number;
+  cart_x_v_m: number;
+}
+export class WasmPendulumPhysics {
+  free(): void;
+  constructor(cart_m: number, m1: number, m2: number, l1_m: number, l2_m: number, g: number);
+  reset(): void;
+  get_state_js(): any;
+  get_params_js(): any;
+  update_physics_step(dt: number, force_override: number, simulation_mode_is_observing: boolean): boolean;
 }
 
-declare type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
+export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
-declare interface InitOutput {
+export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_physicsparams_free: (a: number, b: number) => void;
   readonly __wbg_get_physicsparams_cart_m: (a: number) => number;
@@ -72,6 +69,17 @@ declare interface InitOutput {
   readonly __wbindgen_start: () => void;
 }
 
+export type SyncInitInput = BufferSource | WebAssembly.Module;
+/**
+* Instantiates the given `module`, which can either be bytes or
+* a precompiled `WebAssembly.Module`.
+*
+* @param {{ module: SyncInitInput }} module - Passing `SyncInitInput` directly is deprecated.
+*
+* @returns {InitOutput}
+*/
+export function initSync(module: { module: SyncInitInput } | SyncInitInput): InitOutput;
+
 /**
 * If `module_or_path` is {RequestInfo} or {URL}, makes a request and
 * for everything else, calls `WebAssembly.instantiate` directly.
@@ -80,4 +88,4 @@ declare interface InitOutput {
 *
 * @returns {Promise<InitOutput>}
 */
-declare function wasm_bindgen (module_or_path?: { module_or_path: InitInput | Promise<InitInput> } | InitInput | Promise<InitInput>): Promise<InitOutput>;
+export default function __wbg_init (module_or_path?: { module_or_path: InitInput | Promise<InitInput> } | InitInput | Promise<InitInput>): Promise<InitOutput>;
