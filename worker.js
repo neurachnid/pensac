@@ -333,59 +333,55 @@ class DDPGAgent {
     train() {
         if (this.replayBuffer.length < this.batchSize) return {};
 
-        const b = this.sampleBatch();
-        const states = tf.tensor(b.states);
-        const actions = tf.tensor(b.actions);
-        const rewards = tf.tensor(b.rewards);
-        const nextStates = tf.tensor(b.nextStates);
-        const dones = tf.tensor(b.dones);
+        // Wrap the entire training operation in a tf.tidy() to prevent memory leaks
+        return tf.tidy(() => {
+            const b = this.sampleBatch();
+            const states = tf.tensor(b.states);
+            const actions = tf.tensor(b.actions);
+            const rewards = tf.tensor(b.rewards);
+            const nextStates = tf.tensor(b.nextStates);
+            const dones = tf.tensor(b.dones);
 
-        const criticVars = this.critic.trainableWeights.map(w => w.val);
-        const criticGradsObj = tf.variableGrads(() => {
-            const nextActions = this.targetActor.predict(nextStates);
-            const qNext = this.targetCritic.predict([nextStates, nextActions]).reshape([this.batchSize]);
-            const y = rewards.reshape([this.batchSize]).add(
-                dones.reshape([this.batchSize]).mul(-1).add(1).mul(this.gamma).mul(qNext)
-            );
-            const q = this.critic.predict([states, actions]).reshape([this.batchSize]);
-            return tf.losses.meanSquaredError(y, q);
-        }, criticVars);
-        this.criticOptimizer.applyGradients(criticGradsObj.grads);
+            // --- Critic Training ---
+            const criticVars = this.critic.trainableWeights.map(w => w.val);
+            const criticGradsObj = tf.variableGrads(() => {
+                const nextActions = this.targetActor.predict(nextStates);
+                const qNext = this.targetCritic.predict([nextStates, nextActions]).reshape([this.batchSize]);
+                const y = rewards.reshape([this.batchSize]).add(
+                    dones.reshape([this.batchSize]).mul(-1).add(1).mul(this.gamma).mul(qNext)
+                );
+                const q = this.critic.predict([states, actions]).reshape([this.batchSize]);
+                return tf.losses.meanSquaredError(y, q);
+            }, criticVars);
+            this.criticOptimizer.applyGradients(criticGradsObj.grads);
 
-        let criticGradNorm = 0;
-        for (const g of Object.values(criticGradsObj.grads)) {
-            criticGradNorm += g.norm().dataSync()[0];
-        }
-        const criticLoss = criticGradsObj.value.dataSync()[0];
+            let criticGradNorm = 0;
+            for (const g of Object.values(criticGradsObj.grads)) {
+                criticGradNorm += g.norm().dataSync()[0];
+            }
+            const criticLoss = criticGradsObj.value.dataSync()[0];
 
-        const actorVars = this.actor.trainableWeights.map(w => w.val);
-        const actorGradsObj = tf.variableGrads(() => {
-            const act = this.actor.predict(states);
-            const qVal = this.critic.predict([states, act]).reshape([this.batchSize]);
-            return tf.neg(tf.mean(qVal));
-        }, actorVars);
-        this.actorOptimizer.applyGradients(actorGradsObj.grads);
+            // --- Actor Training ---
+            const actorVars = this.actor.trainableWeights.map(w => w.val);
+            const actorGradsObj = tf.variableGrads(() => {
+                const act = this.actor.predict(states);
+                const qVal = this.critic.predict([states, act]).reshape([this.batchSize]);
+                return tf.neg(tf.mean(qVal));
+            }, actorVars);
+            this.actorOptimizer.applyGradients(actorGradsObj.grads);
 
-        let actorGradNorm = 0;
-        for (const g of Object.values(actorGradsObj.grads)) {
-            actorGradNorm += g.norm().dataSync()[0];
-        }
-        const actorLoss = actorGradsObj.value.dataSync()[0];
+            let actorGradNorm = 0;
+            for (const g of Object.values(actorGradsObj.grads)) {
+                actorGradNorm += g.norm().dataSync()[0];
+            }
+            const actorLoss = actorGradsObj.value.dataSync()[0];
 
-        this.updateTargetNetworks(this.tau);
-
-        // Dispose tensors to prevent memory leaks
-        states.dispose();
-        actions.dispose();
-        rewards.dispose();
-        nextStates.dispose();
-        dones.dispose();
-        for (const g of Object.values(criticGradsObj.grads)) g.dispose();
-        for (const g of Object.values(actorGradsObj.grads)) g.dispose();
-        criticGradsObj.value.dispose();
-        actorGradsObj.value.dispose();
-
-        return {criticLoss, actorLoss, criticGradNorm, actorGradNorm};
+            this.updateTargetNetworks(this.tau);
+            
+            // All intermediate tensors are automatically disposed by tf.tidy().
+            // We return the scalar values for logging.
+            return {criticLoss, actorLoss, criticGradNorm, actorGradNorm};
+        });
     }
 
     updateTargetNetworks(tau) {
