@@ -1,15 +1,38 @@
 // This script runs in a separate thread.
-// Import TensorFlow.js library and WASM backend as ES modules
-// Use the ESM build so we can import functions like setBackend in a module worker
-import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.esm.js';
-import 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.js';
-// Import the JS glue code for your Wasm physics module
-import initWasm, { WasmPendulumPhysics } from './pkg_physics/physics_engine.js';
+// Load TensorFlow.js library and WASM backend
+// Use importScripts because tf.js provides a UMD build
+self.importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js');
+self.importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.js');
+
+// Dynamically import the Wasm module so we can use a classic worker
+let initWasm, WasmPendulumPhysics;
+const wasmReady = (async () => {
+    try {
+        const moduleUrl = new URL('./pkg_physics/physics_engine.js', self.location).href;
+        const wasmModule = await import(moduleUrl);
+        initWasm = wasmModule.default;
+        WasmPendulumPhysics = wasmModule.WasmPendulumPhysics;
+        await configureTensorFlowJS();
+    } catch (err) {
+        self.postMessage({ type: 'error', payload: { message: err.message || String(err) } });
+        throw err;
+    }
+})();
+
+self.addEventListener('error', (e) => {
+    self.postMessage({ type: 'error', payload: { message: e.message } });
+});
+
+self.addEventListener('unhandledrejection', (e) => {
+    const msg = (e.reason && (e.reason.message || String(e.reason))) || 'Unhandled rejection';
+    self.postMessage({ type: 'error', payload: { message: msg } });
+});
 
 // Enhanced TensorFlow.js Configuration for Performance
 async function configureTensorFlowJS() {
     // Initialize Wasm module built with wasm-bindgen
-    await initWasm('./pkg_physics/physics_engine_bg.wasm');
+    const wasmPath = new URL('./pkg_physics/physics_engine_bg.wasm', self.location).href;
+    await initWasm(wasmPath);
 
     // Configure TensorFlow.js to use the WebAssembly backend if available
     try {
@@ -33,8 +56,6 @@ async function configureTensorFlowJS() {
     console.log('Memory info:', tf.memory());
 }
 
-// Call configuration immediately
-configureTensorFlowJS();
 
 // --- Environment Physics (moved to worker) ---
 class PendulumPhysics {
@@ -466,7 +487,9 @@ function validateReward(reward, context = 'unknown') {
     return true;
 }
 
-function init() {
+async function init() {
+    // Ensure the Wasm module and TensorFlow.js backend are ready
+    await wasmReady;
     agent = new DDPGAgent();
     physics = new PendulumPhysics();
     physics.maxSteps = MAX_EPISODE_STEPS; // Update physics
@@ -753,12 +776,12 @@ function runSimulationLoop() {
 const runSimulation = runSimulationLoop; 
 
 // Worker message handler
-self.onmessage = function(e) {
+self.onmessage = async function(e) {
     const { type, payload } = e.data;
 
     switch(type) {
         case 'start_training':
-            if (!agent) init();
+            if (!agent) await init();
             simulationMode = 'TRAINING';
             isPaused = false;
             isObservingPolicyWhileTrainingPaused = false;
@@ -831,7 +854,7 @@ self.onmessage = function(e) {
             break;
         case 'reset_agent':
             simulationMode = 'IDLE'; // isPaused and isObservingPolicyWhileTrainingPaused will be reset by init()
-            init();
+            await init();
             self.postMessage({ type: 'sps_update', payload: { sps: 0 } }); // Clear SPS on UI
             self.postMessage({ type: 'reset_complete', payload: { status: 'Agent Reset' } });
             break;
