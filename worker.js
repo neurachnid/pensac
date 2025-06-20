@@ -2,6 +2,7 @@
 // Import TensorFlow.js library and WASM backend as ES modules
 import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/index.js?module';
 import 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/index.js?module';
+
 // Import the JS glue code for your Wasm physics module
 import initWasm, { WasmPendulumPhysics } from './pkg_physics/physics_engine.js';
 
