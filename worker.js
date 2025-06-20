@@ -1,18 +1,15 @@
 // This script runs in a separate thread.
-// Import TensorFlow.js library within the worker
-self.importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js');
+// Import TensorFlow.js as an ES module
+import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.esm.js';
 // Load the TensorFlow.js WebAssembly backend
-self.importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.js');
+import 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.js';
 // Import the JS glue code for your Wasm physics module
-self.importScripts('./pkg_physics/physics_engine.js'); // Path to wasm-pack output
+import initWasm, { WasmPendulumPhysics } from './pkg_physics/physics_engine.js';
 
 // Enhanced TensorFlow.js Configuration for Performance
 async function configureTensorFlowJS() {
-    // Initialize Wasm module (wasm-pack generated)
-    // For --target no-modules, wasm_bindgen becomes a global function.
-    // self.wasm_bindgen or just wasm_bindgen should work.
-    // Pass an object with the module path to satisfy the newer init pattern.
-    await wasm_bindgen({ module_or_path: './pkg_physics/physics_engine_bg.wasm' });
+    // Initialize Wasm module built with wasm-bindgen
+    await initWasm('./pkg_physics/physics_engine_bg.wasm');
 
     // Configure TensorFlow.js to use the WebAssembly backend if available
     try {
@@ -52,9 +49,8 @@ class PendulumPhysics {
             l2_m: 0.5,
             g: 9.81
         };
-        // For --target no-modules, WasmPendulumPhysics becomes a global constructor.
-        // self.WasmPendulumPhysics or just WasmPendulumPhysics should work.
-        this.wasmInstance = new wasm_bindgen.WasmPendulumPhysics(p.cart_m, p.m1, p.m2, p.l1_m, p.l2_m, p.g);
+        // Instantiate the Wasm physics engine
+        this.wasmInstance = new WasmPendulumPhysics(p.cart_m, p.m1, p.m2, p.l1_m, p.l2_m, p.g);
         this.params = this.wasmInstance.get_params_js(); // Get params from Wasm
         this.state = this.wasmInstance.get_state_js();   // Get initial state from Wasm
         // The paper applies forces in the range [-15, 15] N
