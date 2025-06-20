@@ -74,7 +74,10 @@ class PendulumRenderer {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    const worker = new Worker('worker.js', { type: 'module' });
+    const worker = new Worker('worker.js');
+    worker.addEventListener('error', (e) => {
+        console.error('Worker error:', e.message);
+    });
     
     const renderer = new PendulumRenderer();
     // Main control buttons - pauseResumeButton will be repurposed
