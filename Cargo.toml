@@ -18,3 +18,9 @@ console_error_panic_hook = { version = "0.1.7", optional = true }
 [profile.release]
 opt-level = "s" # Optimize for size
 lto = true
+
+[package.metadata.wasm-pack.profile.release]
+out-dir = "pkg_physics"
+
+[package.metadata.wasm-pack.profile.dev]
+out-dir = "pkg_physics"
