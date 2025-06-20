@@ -33,8 +33,8 @@ async function configureTensorFlowJS() {
     console.log('Memory info:', tf.memory());
 }
 
-// Call configuration immediately
-configureTensorFlowJS();
+// Call configuration immediately and keep the promise so we can await it later
+const tfReadyPromise = configureTensorFlowJS();
 
 // --- Environment Physics (moved to worker) ---
 class PendulumPhysics {
@@ -753,11 +753,13 @@ function runSimulationLoop() {
 const runSimulation = runSimulationLoop; 
 
 // Worker message handler
-self.onmessage = function(e) {
+self.onmessage = async function(e) {
     const { type, payload } = e.data;
 
     switch(type) {
         case 'start_training':
+            // Ensure TensorFlow.js and the Wasm module are ready before starting
+            await tfReadyPromise;
             if (!agent) init();
             simulationMode = 'TRAINING';
             isPaused = false;
