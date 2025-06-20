@@ -35,6 +35,9 @@ pub struct PhysicsParams {
     pub l1_m: f64,
     pub l2_m: f64,
     pub g: f64,
+    pub cart_b: f64,
+    pub p1_b: f64,
+    pub p2_b: f64,
 }
 
 #[wasm_bindgen]
@@ -58,7 +61,17 @@ pub struct WasmPendulumPhysics {
 impl WasmPendulumPhysics {
     #[wasm_bindgen(constructor)]
     pub fn new(cart_m: f64, m1: f64, m2: f64, l1_m: f64, l2_m: f64, g: f64) -> Self {
-        let params = PhysicsParams { cart_m, m1, m2, l1_m, l2_m, g };
+        let params = PhysicsParams {
+            cart_m,
+            m1,
+            m2,
+            l1_m,
+            l2_m,
+            g,
+            cart_b: 0.05,
+            p1_b: 0.001,
+            p2_b: 0.001,
+        };
         let initial_state = Self::get_initial_down_state();
         WasmPendulumPhysics {
             params,
@@ -205,7 +218,7 @@ fn multiply_matrix_vector_3x3(m: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
 
 // Compute accelerations q_ddot = [x_ddot, a1_ddot, a2_ddot]
 fn compute_q_ddot(params: PhysicsParams, state: PhysicsState, fx: f64) -> Option<[f64; 3]> {
-    let PhysicsParams { cart_m, m1, m2, l1_m, l2_m, g } = params;
+    let PhysicsParams { cart_m, m1, m2, l1_m, l2_m, g, cart_b, p1_b, p2_b } = params;
     let PhysicsState { a1, a2, a1_v, a2_v, cart_x_m: _, cart_x_v_m } = state;
 
     let state_vars = [a1, a2, a1_v, a2_v, cart_x_v_m];
@@ -240,9 +253,16 @@ fn compute_q_ddot(params: PhysicsParams, state: PhysicsState, fx: f64) -> Option
     ];
 
     let b_vector = [
-        fx + m_total_pend * l1_m * s1 * clamped_a1_v * clamped_a1_v + m2 * l2_m * s2 * clamped_a2_v * clamped_a2_v,
-        -m2 * l1_m * l2_m * s12 * clamped_a2_v * clamped_a2_v - m_total_pend * g * l1_m * s1,
-        m2 * l1_m * l2_m * s12 * clamped_a1_v * clamped_a1_v - m2 * g * l2_m * s2,
+        fx
+            - cart_b * cart_x_v_m
+            + m_total_pend * l1_m * s1 * clamped_a1_v * clamped_a1_v
+            + m2 * l2_m * s2 * clamped_a2_v * clamped_a2_v,
+        -p1_b * clamped_a1_v
+            - m2 * l1_m * l2_m * s12 * clamped_a2_v * clamped_a2_v
+            - m_total_pend * g * l1_m * s1,
+        -p2_b * clamped_a2_v
+            + m2 * l1_m * l2_m * s12 * clamped_a1_v * clamped_a1_v
+            - m2 * g * l2_m * s2,
     ];
 
     for r in 0..3 {

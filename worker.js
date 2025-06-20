@@ -152,9 +152,10 @@ class PendulumPhysics {
             done = !physics_ok;
             if (done) this.lastTerminationReason = 'Physics Unstable (Observe Mode)';
         } else { // TRAINING or other modes
-            // Episode ends only if physics unstable or max steps reached.
             if (!physics_ok) {
                 done = true; this.lastTerminationReason = 'Physics Unstable';
+            } else if (Math.abs(this.state.cart_x_m) > this.trackLimit) {
+                done = true; this.lastTerminationReason = 'Track Limit';
             } else if (this.currentStep >= this.maxSteps) {
                 done = true; this.lastTerminationReason = 'Max Episode Steps Reached';
             } else {
