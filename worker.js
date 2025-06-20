@@ -1,8 +1,8 @@
 // This script runs in a separate thread.
-// Import TensorFlow.js library and WASM backend as ES modules
-// Use the ESM build so we can import functions like setBackend in a module worker
-import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.esm.js';
-import 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.js';
+// Load TensorFlow.js library and WASM backend
+// Use importScripts because tf.js provides a UMD build
+self.importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js');
+self.importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.js');
 // Import the JS glue code for your Wasm physics module
 import initWasm, { WasmPendulumPhysics } from './pkg_physics/physics_engine.js';
 
