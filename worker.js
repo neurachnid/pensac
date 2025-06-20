@@ -1,8 +1,10 @@
 // This script runs in a separate thread.
-// Import TensorFlow.js library and WASM backend as ES modules
-// Use the ESM build so we can import functions like setBackend in a module worker
-import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.esm.js';
-import 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.js';
+// Import TensorFlow.js using an ES module bundle from Skypack so that
+// functions like `setBackend` and the Layers API are available in this
+// module worker environment.
+import * as tf from 'https://cdn.skypack.dev/@tensorflow/tfjs';
+// Load the WebAssembly backend for TensorFlow.js
+import 'https://cdn.skypack.dev/@tensorflow/tfjs-backend-wasm';
 // Import the JS glue code for your Wasm physics module
 import initWasm, { WasmPendulumPhysics } from './pkg_physics/physics_engine.js';
 
