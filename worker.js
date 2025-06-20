@@ -1,7 +1,8 @@
 // This script runs in a separate thread.
 // Import TensorFlow.js library and WASM backend as ES modules
-import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js';
-import 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.js';
+import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/index.js?module';
+import 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/index.js?module';
+
 // Import the JS glue code for your Wasm physics module
 import initWasm, { WasmPendulumPhysics } from './pkg_physics/physics_engine.js';
 
@@ -26,7 +27,7 @@ async function configureTensorFlowJS() {
     tf.env().set('WEBGL_PACK', true);
     tf.env().set('WEBGL_FORCE_F16_TEXTURES', true);
     tf.env().set('WEBGL_RENDER_FLOAT32_CAPABLE', true);
-    
+
     console.log('TensorFlow.js optimized backend:', tf.getBackend());
     console.log('Physics Wasm module loaded.');
     console.log('Memory info:', tf.memory());
