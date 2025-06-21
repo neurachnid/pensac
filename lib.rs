@@ -98,6 +98,12 @@ impl WasmPendulumPhysics {
     pub fn get_state_js(&self) -> JsValue {
         serde_wasm_bindgen::to_value(&self.state).unwrap_or(JsValue::NULL)
     }
+
+    pub fn set_state_js(&mut self, js: JsValue) {
+        if let Ok(state) = serde_wasm_bindgen::from_value(js) {
+            self.state = state;
+        }
+    }
     
     // Returns the current params as a JS object
     pub fn get_params_js(&self) -> JsValue {

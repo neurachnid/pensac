@@ -73,7 +73,10 @@ class PendulumPhysics {
             m2: 0.025,
             l1_m: 0.5,
             l2_m: 0.5,
-            g: 9.81
+            g: 9.81,
+            cart_b: 0.05,
+            p1_b: 0.001,
+            p2_b: 0.001
         };
         // Instantiate the Wasm physics engine
         this.wasmInstance = new WasmPendulumPhysics(p.cart_m, p.m1, p.m2, p.l1_m, p.l2_m, p.g);
@@ -247,7 +250,15 @@ class DDPGAgent {
         this.bufferSize = 1000000; // Replay buffer of 1M transitions
         this.warmupSteps = AGENT_WARMUP_STEPS; // keep in sync with constant
 
-        this.replayBuffer = [];
+        this.replayBuffer = new Array(this.bufferSize);
+        this.bufferHead = 0;
+        this.bufferLen = 0;
+
+        this.ouState = 0;
+        this.ouTheta = 0.15;
+        this.ouSigma = 0.3;
+        this.ouSigmaMin = 0.05;
+        this.ouSigmaDecay = 0.9995;
         this.isReady = false;
 
         this.stateRunningMean = new Array(this.stateSize).fill(0);
@@ -319,7 +330,10 @@ class DDPGAgent {
             let chosenVal = meanVal;
 
             if (!deterministic) {
-                chosenVal += (Math.random() * 2 - 1) * 0.1;
+                const noise = this.ouState + this.ouTheta * (0 - this.ouState) + this.ouSigma * Math.sqrt(1) * tf.randomNormal([1]).dataSync()[0];
+                this.ouState = noise;
+                this.ouSigma = Math.max(this.ouSigmaMin, this.ouSigma * this.ouSigmaDecay);
+                chosenVal += noise;
             }
 
             chosenVal = Math.max(-1, Math.min(1, chosenVal));
@@ -345,16 +359,15 @@ class DDPGAgent {
     }
 
     remember(state, action, reward, nextState, done) {
-        if (this.replayBuffer.length >= this.bufferSize) {
-            this.replayBuffer.shift();
-        }
-        this.replayBuffer.push({state, action, reward, nextState, done});
+        this.replayBuffer[this.bufferHead] = {state, action, reward, nextState, done};
+        this.bufferHead = (this.bufferHead + 1) % this.bufferSize;
+        if (this.bufferLen < this.bufferSize) this.bufferLen++;
     }
 
     sampleBatch() {
         const batch = {states: [], actions: [], rewards: [], nextStates: [], dones: []};
         for (let i = 0; i < this.batchSize; i++) {
-            const idx = Math.floor(Math.random() * this.replayBuffer.length);
+            const idx = Math.floor(Math.random() * this.bufferLen);
             const e = this.replayBuffer[idx];
             batch.states.push(e.state);
             batch.actions.push([e.action]);
@@ -366,7 +379,7 @@ class DDPGAgent {
     }
 
     train() {
-        if (this.replayBuffer.length < this.batchSize) return {};
+        if (this.bufferLen < this.batchSize) return {};
 
         // Wrap the entire training operation in a tf.tidy() to prevent memory leaks
         return tf.tidy(() => {
@@ -493,6 +506,79 @@ function validateReward(reward, context = 'unknown') {
     return true;
 }
 
+function episodeEndCleanup(reason) {
+    if (!isValidNumber(totalReward)) {
+        console.warn('Invalid total reward at episode end:', totalReward);
+        totalReward = -100.0;
+    }
+
+    episodeRewards.push(totalReward);
+    if (totalReward > bestReward) bestReward = totalReward;
+    const avgReward = episodeRewards.slice(-10).reduce((a, b) => a + b, 0) / Math.min(10, episodeRewards.length);
+    const validAvgReward = isValidNumber(avgReward) ? avgReward : totalReward;
+
+    const avgLast5 = episodeRewards.slice(-5).reduce((a,b) => a+b,0) / Math.min(5, episodeRewards.length);
+
+    self.postMessage({
+        type: 'episode_done',
+        payload: {
+            episode,
+            totalReward,
+            bestReward,
+            avgReward: validAvgReward,
+            totalSteps: simulationMode === 'TRAINING' ? totalSteps : undefined,
+            episodeSteps: physics.currentStep,
+            mode: isObservingPolicyWhileTrainingPaused ? 'TRAINING_PAUSED_OBSERVING' : simulationMode,
+            bufferSize: agent.bufferLen ?? agent.replayBuffer.length
+        },
+        trainingLosses: lastTrainingLosses,
+        lastStepRewardComponents: physics.getRewardComponents(),
+        lastAction: latestAction,
+        policyDiagnostics: lastPolicyDiagnostics,
+        terminationReason: reason,
+        agentConfig: {
+            actorLr: agent.actorLr,
+            criticLr: agent.criticLr,
+            batchSize: agent.batchSize,
+            tau: agent.tau,
+            gamma: agent.gamma,
+            bufferSize: agent.bufferSize,
+            warmupSteps: AGENT_WARMUP_STEPS,
+            trainFrequency: TRAIN_FREQUENCY,
+            stateSize: agent.stateSize,
+            actionSize: agent.actionSize,
+            stateNormalizationMean: agent.stateRunningMean.map(v => parseFloat(v.toFixed(4))),
+            stateNormalizationVar: agent.stateRunningVar.map(v => parseFloat(v.toFixed(4)))
+        },
+        physicsRewardConfig: physics.getEffectiveRewardWeights(),
+        currentSpeed: currentSimStepsPerFrame
+    });
+
+    episode++;
+    totalReward = 0;
+    state = physics.reset();
+    if (!validateState(state, 'episode-reset')) {
+        console.error('Invalid state after reset, forcing new reset');
+        physics = new PendulumPhysics();
+        state = physics.reset();
+    }
+    if ((simulationMode !== 'TRAINING' || isObservingPolicyWhileTrainingPaused) || totalSteps < AGENT_WARMUP_STEPS) {
+        latestAction = 0;
+    }
+    if (episode % 100 === 0 && totalSteps % 10000 === 0) {
+        if (typeof tf !== 'undefined' && tf.memory) {
+            console.debug(`Episode ${episode}, Memory: ${tf.memory().numTensors} tensors`);
+            if (typeof gc !== 'undefined') gc();
+        }
+    }
+
+    if (simulationMode === 'TRAINING' && avgLast5 > -150) {
+        simulationMode = 'OBSERVING';
+        isPaused = false;
+        self.postMessage({ type: 'training_stopped_auto', payload: { avgReward: avgLast5 } });
+    }
+}
+
 function init() {
     agent = new DDPGAgent();
     physics = new PendulumPhysics();
@@ -594,84 +680,7 @@ function simulationStep() {
     // latestAction is already set based on mode for the current step's outcome.
 
     if (done) {
-        // Validate episode reward before logging
-        if (!isValidNumber(totalReward)) {
-            console.warn('Invalid total reward at episode end:', totalReward);
-            totalReward = -100.0; // Use reasonable fallback
-        }
-        
-        episodeRewards.push(totalReward);
-        
-        if (totalReward > bestReward) {
-            bestReward = totalReward;
-        }
-        
-        const avgReward = episodeRewards.length >= 10 ? 
-            episodeRewards.slice(-10).reduce((a, b) => a + b) / 10 : totalReward;
-        
-        // Validate avgReward
-        const validAvgReward = isValidNumber(avgReward) ? avgReward : totalReward;
-        
-        self.postMessage({
-            type: 'episode_done',
-            payload: {
-                episode,
-                totalReward,
-                bestReward,
-                avgReward: validAvgReward,
-                totalSteps: simulationMode === 'TRAINING' ? totalSteps : undefined,
-                episodeSteps: physics.currentStep,
-                mode: isObservingPolicyWhileTrainingPaused ? 'TRAINING_PAUSED_OBSERVING' : simulationMode,
-                bufferSize: agent.replayBuffer.length
-            },
-            // Add more detailed snapshot data
-            trainingLosses: lastTrainingLosses, 
-            lastStepRewardComponents: physics.getRewardComponents(),
-            // Send the action and diagnostics for the step that ended the episode
-            lastAction: latestAction,
-            policyDiagnostics: lastPolicyDiagnostics,
-            terminationReason: physics.getTerminationReason(),
-            agentConfig: {
-                actorLr: agent.actorLr,
-                criticLr: agent.criticLr,
-                batchSize: agent.batchSize,
-                tau: agent.tau,
-                gamma: agent.gamma,
-                bufferSize: agent.bufferSize,
-                warmupSteps: AGENT_WARMUP_STEPS,
-                trainFrequency: TRAIN_FREQUENCY,
-                stateSize: agent.stateSize,
-                actionSize: agent.actionSize,
-                stateNormalizationMean: agent.stateRunningMean.map(v => parseFloat(v.toFixed(4))),
-                stateNormalizationVar: agent.stateRunningVar.map(v => parseFloat(v.toFixed(4)))
-            },
-            physicsRewardConfig: physics.getEffectiveRewardWeights(),
-            currentSpeed: currentSimStepsPerFrame
-        });
-        
-        episode++;
-        totalReward = 0;
-        state = physics.reset();
-        
-        // Validate reset state
-        if (!validateState(state, 'episode-reset')) {
-            console.error('Invalid state after reset, forcing new reset');
-            physics = new PendulumPhysics(); // Create new physics instance
-            state = physics.reset();
-        }
-        
-        // Reset action for the new episode (will be chosen at start of next simulationStep)
-        if ((simulationMode !== 'TRAINING' || isObservingPolicyWhileTrainingPaused) || totalSteps < AGENT_WARMUP_STEPS) {
-            latestAction = 0;
-        }
-        
-        // Memory management
-        if (episode % 100 === 0) {
-            if (typeof tf !== 'undefined' && tf.memory) {
-                console.log(`Episode ${episode}, Memory: ${tf.memory().numTensors} tensors`);
-                if (typeof gc !== 'undefined') gc();
-            }
-        }
+        episodeEndCleanup(physics.getTerminationReason());
     }
 }
 
@@ -873,6 +882,9 @@ self.onmessage = async function(e) {
             break;
         case 'reset_pendulum_physics_state_only':
             if (physics) {
+                if (simulationMode === 'TRAINING' && !isPaused) {
+                    episodeEndCleanup('Manual Reset');
+                }
                 physics.reset();
                 state = physics.getStateArray();
                 latestAction = 0;
@@ -887,6 +899,8 @@ self.onmessage = async function(e) {
         case 'save_state':
             if (agent && agent.isReady) {
                 try {
+                    await agent.actor.save('localstorage://actor_v1');
+                    await agent.critic.save('localstorage://critic_v1');
                     // Create state snapshot
                     const agentState = {
                         episode,
@@ -927,6 +941,10 @@ self.onmessage = async function(e) {
         case 'load_state':
             if (payload.agentState) {
                 try {
+                    agent.actor = await tf.loadLayersModel('localstorage://actor_v1');
+                    agent.critic = await tf.loadLayersModel('localstorage://critic_v1');
+                    agent.targetActor.setWeights(agent.actor.getWeights());
+                    agent.targetCritic.setWeights(agent.critic.getWeights());
                     // Restore state
                     episode = payload.agentState.episode || 0;
                     totalSteps = payload.agentState.totalSteps || 0;
@@ -943,8 +961,8 @@ self.onmessage = async function(e) {
                     
                     // Restore physics state
                     if (payload.agentState.physics) {
-                        // physics.state = payload.agentState.physics.state; // Wasm manages its own state
-                        // TODO: Need a method in Wasm to set its state if loading. For now, it resets.
+                        physics.wasmInstance.set_state_js(payload.agentState.physics.state);
+                        physics.state = physics.wasmInstance.get_state_js();
                         physics.currentStep = payload.agentState.physics.currentStep;
                     }
                     // Restore simulation mode if relevant
