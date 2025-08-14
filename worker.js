@@ -253,6 +253,9 @@ class ScaleLayer extends tf.layers.Layer {
     }
 }
 
+// Prevent duplicate registration across re-inits
+let scaleLayerRegistered = false;
+
 // --- DDPG Agent Implementation ---
 class DDPGAgent {
     constructor() {
@@ -281,7 +284,7 @@ class DDPGAgent {
     }
 
     async init() {
-        tf.serialization.registerClass(ScaleLayer);
+        if (!scaleLayerRegistered) { tf.serialization.registerClass(ScaleLayer); scaleLayerRegistered = true; }
 
         this.actor = this.buildActor();
         this.critic = this.buildCritic();
@@ -544,7 +547,7 @@ class TD3Agent {
     }
 
     async init() {
-        tf.serialization.registerClass(ScaleLayer);
+        if (!scaleLayerRegistered) { tf.serialization.registerClass(ScaleLayer); scaleLayerRegistered = true; }
         this.actor = this.buildActor();
         this.critic1 = this.buildCritic();
         this.critic2 = this.buildCritic();
@@ -665,8 +668,9 @@ class TD3Agent {
 
             // Target policy smoothing
             const nextActionsMean = this.targetActor.predict(nextStatesN);
-            // Use deterministic noise from our PRNG to improve reproducibility of control flow
-            const noiseVals = nextActionsMean.dataSync().map(() => randNormal() * this.targetPolicyNoise);
+            // Use deterministic noise from our PRNG to improve reproducibility of control flow without GPU->CPU sync
+            const noiseSize = nextActionsMean.size || (nextActionsMean.shape ? nextActionsMean.shape.reduce((a,b)=>a*b,1) : 1);
+            const noiseVals = Array.from({ length: noiseSize }, () => randNormal() * this.targetPolicyNoise);
             const noise = tf.tensor(noiseVals, nextActionsMean.shape);
             const clippedNoise = noise.clipByValue(-this.targetNoiseClip, this.targetNoiseClip);
             const nextActionsNoisy = nextActionsMean.add(clippedNoise).clipByValue(-1, 1);
