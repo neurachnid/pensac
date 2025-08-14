@@ -789,6 +789,15 @@ let lastTrainingLosses = null; // To store results from agent.train()
 let lastSpsCheckTime = 0;
 let stepsSinceLastSpsCheck = 0;
 let domainRandomizationEnabled = false;
+// Evaluation mode
+let isEvaluating = false;
+let evalEpisodesRemaining = 0;
+let evalEpisodesTotal = 0;
+let evalSumReward = 0;
+let evalBestReward = -Infinity;
+let evalPrevMode = 'IDLE';
+let evalPrevAllowRender = true;
+let evalEpisodeReward = 0;
 // const WARMUP_STEPS = 1000; // This is superseded by AGENT_WARMUP_STEPS for agent logic
 const TRAIN_FREQUENCY = 1; // Train after every block of userSetStepsPerFrame steps if slider is >=1x
 const MAX_EPISODE_STEPS = 1000; // Match reference paper
@@ -901,16 +910,16 @@ function simulationStep() {
     }
     
     let actionToTake;
-    const isDeterministicAction = simulationMode === 'OBSERVING' || isObservingPolicyWhileTrainingPaused;
+    const isDeterministicAction = simulationMode === 'OBSERVING' || isObservingPolicyWhileTrainingPaused || isEvaluating;
 
-    if (simulationMode === 'TRAINING' && !isObservingPolicyWhileTrainingPaused) { // True training step
+    if (simulationMode === 'TRAINING' && !isObservingPolicyWhileTrainingPaused && !isEvaluating) { // True training step
         if (totalSteps < AGENT_WARMUP_STEPS) { // Use agent's warmup steps
             actionToTake = (randUniform() * 2 - 1);
         } else {
             actionToTake = agent.chooseAction(currentStateForAction, false, totalSteps); // Stochastic
         }
-    } else { // OBSERVING mode or observing policy while training is "paused"
-        actionToTake = agent.chooseAction(currentStateForAction, isDeterministicAction, totalSteps); // Deterministic
+    } else { // OBSERVING mode, observing policy while training is "paused", or Evaluating
+        actionToTake = agent.chooseAction(currentStateForAction, isDeterministicAction, totalSteps); // Deterministic when not true training
     }
     latestAction = actionToTake; // Store the chosen action (normalized)
 
@@ -922,7 +931,9 @@ function simulationStep() {
     lastPolicyDiagnostics = agent.getPolicyDiagnostics(); // Get diagnostics after action is chosen
     
     const scaledAction = actionToTake * physics.actionMax;
-    const { next_state, reward, done } = physics.step(scaledAction, simulationMode); // Pass the global simulationMode
+    // In evaluation, apply training-like termination criteria
+    const modeForStep = isEvaluating ? 'TRAINING' : simulationMode;
+    const { next_state, reward, done } = physics.step(scaledAction, modeForStep);
 
     // Comprehensive validation
     if (!validateState(next_state, 'simulationStep-next')) {
@@ -934,16 +945,25 @@ function simulationStep() {
     if (!validateReward(reward, 'simulationStep')) {
         console.warn('Invalid reward detected, using fallback reward');
         const fallbackReward = -1.0; // Small negative reward for invalid state
-        totalReward += fallbackReward;
-        if (!isValidNumber(totalReward)) {
-            totalReward = -100.0; // Reset to reasonable value
+        if (isEvaluating) {
+            evalEpisodeReward += fallbackReward;
+            if (!isValidNumber(evalEpisodeReward)) evalEpisodeReward = -100.0;
+        } else {
+            totalReward += fallbackReward;
+            if (!isValidNumber(totalReward)) {
+                totalReward = -100.0; // Reset to reasonable value
+            }
         }
     } else {
-        totalReward += reward;
+        if (isEvaluating) {
+            evalEpisodeReward += reward;
+        } else {
+            totalReward += reward;
+        }
     }
 
     // Store experience and increment totalSteps only if in actual TRAINING mode (not observing paused policy)
-    if (simulationMode === 'TRAINING' && !isObservingPolicyWhileTrainingPaused) {
+    if (simulationMode === 'TRAINING' && !isObservingPolicyWhileTrainingPaused && !isEvaluating) {
         totalSteps++; // Only count steps that contribute to training
         if (validateState(currentStateForAction, 'experience-current') && 
             validateState(next_state, 'experience-next') && 
@@ -962,75 +982,94 @@ function simulationStep() {
 
     if (done) {
         // Validate episode reward before logging
-        if (!isValidNumber(totalReward)) {
-            console.warn('Invalid total reward at episode end:', totalReward);
-            totalReward = -100.0; // Use reasonable fallback
-        }
-        
-        episodeRewards.push(totalReward);
-        
-        if (totalReward > bestReward) {
-            bestReward = totalReward;
-        }
-        
-        const avgReward = episodeRewards.length >= 10 ? 
-            episodeRewards.slice(-10).reduce((a, b) => a + b) / 10 : totalReward;
-        
-        // Validate avgReward
-        const validAvgReward = isValidNumber(avgReward) ? avgReward : totalReward;
-        
-        self.postMessage({
-            type: 'episode_done',
-            payload: {
-                episode,
-                totalReward,
-                bestReward,
-                avgReward: validAvgReward,
-                totalSteps: simulationMode === 'TRAINING' ? totalSteps : undefined,
-                episodeSteps: physics.currentStep,
-                mode: isObservingPolicyWhileTrainingPaused ? 'TRAINING_PAUSED_OBSERVING' : simulationMode,
-                bufferSize: getReplaySize()
-            },
-            // Add more detailed snapshot data
-            trainingLosses: lastTrainingLosses, 
-            lastStepRewardComponents: physics.getRewardComponents(),
-            // Send the action and diagnostics for the step that ended the episode
-            lastAction: latestAction,
-            policyDiagnostics: lastPolicyDiagnostics,
-            terminationReason: physics.getTerminationReason(),
-            agentConfig: {
-                actorLr: agent.actorLr,
-                criticLr: agent.criticLr,
-                batchSize: agent.batchSize,
-                tau: agent.tau,
-                gamma: agent.gamma,
-                bufferSize: agent.bufferSize,
-                warmupSteps: AGENT_WARMUP_STEPS,
-                trainFrequency: TRAIN_FREQUENCY,
-                stateSize: agent.stateSize,
-                actionSize: agent.actionSize,
-                algorithm: SELECTED_ALGO,
-                stateNormalizationMean: agent.stateRunningMean.map(v => parseFloat(v.toFixed(4))),
-                stateNormalizationVar: agent.stateRunningVar.map(v => parseFloat(v.toFixed(4)))
-            },
-            physicsRewardConfig: physics.getEffectiveRewardWeights(),
-            currentSpeed: currentSimStepsPerFrame
-        });
-        
-        episode++;
-        totalReward = 0;
-        state = physics.reset(true, simulationMode === 'TRAINING');
-        
-        // Validate reset state
-        if (!validateState(state, 'episode-reset')) {
-            console.error('Invalid state after reset, forcing new reset');
-            physics = new PendulumPhysics(); // Create new physics instance
+        if (isEvaluating) {
+            // eval episode end accounting
+            if (!isValidNumber(evalEpisodeReward)) evalEpisodeReward = -100.0;
+            evalSumReward += evalEpisodeReward;
+            if (evalEpisodeReward > evalBestReward) evalBestReward = evalEpisodeReward;
+            evalEpisodesRemaining--;
+            evalEpisodeReward = 0;
+            // Reset env (no randomize for evaluation)
+            state = physics.reset(true, false);
+            if (evalEpisodesRemaining <= 0) {
+                const avg = evalEpisodesTotal > 0 ? evalSumReward / evalEpisodesTotal : 0;
+                self.postMessage({ type: 'evaluation_complete', payload: { episodes: evalEpisodesTotal, avgReward: avg, bestReward: evalBestReward } });
+                // Restore previous state
+                isEvaluating = false;
+                simulationMode = evalPrevMode;
+                allowRender = evalPrevAllowRender;
+            }
+        } else {
+            if (!isValidNumber(totalReward)) {
+                console.warn('Invalid total reward at episode end:', totalReward);
+                totalReward = -100.0; // Use reasonable fallback
+            }
+            
+            episodeRewards.push(totalReward);
+            
+            if (totalReward > bestReward) {
+                bestReward = totalReward;
+            }
+            
+            const avgReward = episodeRewards.length >= 10 ? 
+                episodeRewards.slice(-10).reduce((a, b) => a + b) / 10 : totalReward;
+            
+            // Validate avgReward
+            const validAvgReward = isValidNumber(avgReward) ? avgReward : totalReward;
+            
+            self.postMessage({
+                type: 'episode_done',
+                payload: {
+                    episode,
+                    totalReward,
+                    bestReward,
+                    avgReward: validAvgReward,
+                    totalSteps: simulationMode === 'TRAINING' ? totalSteps : undefined,
+                    episodeSteps: physics.currentStep,
+                    mode: isObservingPolicyWhileTrainingPaused ? 'TRAINING_PAUSED_OBSERVING' : simulationMode,
+                    bufferSize: getReplaySize()
+                },
+                // Add more detailed snapshot data
+                trainingLosses: lastTrainingLosses, 
+                lastStepRewardComponents: physics.getRewardComponents(),
+                // Send the action and diagnostics for the step that ended the episode
+                lastAction: latestAction,
+                policyDiagnostics: lastPolicyDiagnostics,
+                terminationReason: physics.getTerminationReason(),
+                agentConfig: {
+                    actorLr: agent.actorLr,
+                    criticLr: agent.criticLr,
+                    batchSize: agent.batchSize,
+                    tau: agent.tau,
+                    gamma: agent.gamma,
+                    bufferSize: agent.bufferSize,
+                    warmupSteps: AGENT_WARMUP_STEPS,
+                    trainFrequency: TRAIN_FREQUENCY,
+                    stateSize: agent.stateSize,
+                    actionSize: agent.actionSize,
+                    algorithm: SELECTED_ALGO,
+                    stateNormalizationMean: agent.stateRunningMean.map(v => parseFloat(v.toFixed(4))),
+                    stateNormalizationVar: agent.stateRunningVar.map(v => parseFloat(v.toFixed(4)))
+                },
+                physicsRewardConfig: physics.getEffectiveRewardWeights(),
+                currentSpeed: currentSimStepsPerFrame
+            });
+            
+            episode++;
+            totalReward = 0;
             state = physics.reset(true, simulationMode === 'TRAINING');
-        }
-        
-        // Reset action for the new episode (will be chosen at start of next simulationStep)
-        if ((simulationMode !== 'TRAINING' || isObservingPolicyWhileTrainingPaused) || totalSteps < AGENT_WARMUP_STEPS) {
-            latestAction = 0;
+            
+            // Validate reset state
+            if (!validateState(state, 'episode-reset')) {
+                console.error('Invalid state after reset, forcing new reset');
+                physics = new PendulumPhysics(); // Create new physics instance
+                state = physics.reset(true, simulationMode === 'TRAINING');
+            }
+            
+            // Reset action for the new episode (will be chosen at start of next simulationStep)
+            if ((simulationMode !== 'TRAINING' || isObservingPolicyWhileTrainingPaused) || totalSteps < AGENT_WARMUP_STEPS) {
+                latestAction = 0;
+            }
         }
         
         // Memory management
@@ -1180,6 +1219,21 @@ self.onmessage = async function(e) {
             } : null;
 
             self.postMessage({ type: 'training_started', payload: { status: 'Training Active', agentConfig: initialAgentConfig } });
+            runSimulationLoop();
+            break;
+        case 'start_evaluation':
+            // Configure to evaluate deterministically for N episodes
+            await tfReadyPromise;
+            if (!agent) init();
+            isEvaluating = true;
+            evalEpisodesRemaining = (payload && payload.episodes) ? Math.max(1, Math.floor(payload.episodes)) : 10;
+            evalEpisodesTotal = evalEpisodesRemaining;
+            evalSumReward = 0; evalBestReward = -Infinity; evalEpisodeReward = 0;
+            evalPrevMode = simulationMode; evalPrevAllowRender = allowRender;
+            isPaused = false; isObservingPolicyWhileTrainingPaused = false;
+            allowRender = true; // watch
+            // Put loop in running state; underlying termination uses training criteria for evaluation
+            if (simulationMode === 'IDLE') simulationMode = 'OBSERVING';
             runSimulationLoop();
             break;
         case 'set_seed':
