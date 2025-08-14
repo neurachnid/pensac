@@ -58,7 +58,7 @@ class PendulumRenderer {
         const minBobRadiusPx = 4; // Minimum pixel radius for bobs
         const visual_r1 = Math.max(minBobRadiusPx, Math.pow(this.params.m1, 1/3) * visualMassScaleFactor * this.pixelsPerMeter);
         const visual_r2 = Math.max(minBobRadiusPx, Math.pow(this.params.m2, 1/3) * visualMassScaleFactor * this.pixelsPerMeter);
-        this.p_ctx.beginPath(); this.p_ctx.arc(x1, y1, visual_r1, 0, 2 * Math.PI); const isTraining = (document.getElementById('currentMode').textContent || '').toLowerCase().includes('training'); this.p_ctx.fillStyle = isTraining ? '#3b82f6' : '#60a5fa'; this.p_ctx.fill(); 
+        this.p_ctx.beginPath(); this.p_ctx.arc(x1, y1, visual_r1, 0, 2 * Math.PI); const isTraining = (typeof workerAppMode !== 'undefined') && (workerAppMode === 'TRAINING' || workerAppMode === 'PAUSED_TRAINING_SHOWING_POLICY'); this.p_ctx.fillStyle = isTraining ? '#3b82f6' : '#60a5fa'; this.p_ctx.fill(); 
         this.p_ctx.beginPath(); this.p_ctx.arc(x2, y2, visual_r2, 0, 2 * Math.PI); this.p_ctx.fillStyle = isTraining ? '#ef4444' : '#f87171'; this.p_ctx.fill(); 
     }
     drawGrid() { this.t_ctx.clearRect(0, 0, this.traceCanvas.width, this.traceCanvas.height); this.t_ctx.fillStyle = '#1f2937'; this.t_ctx.fillRect(0, 0, this.traceCanvas.width, this.traceCanvas.height); const meterInPixels = 1 * this.pixelsPerMeter; const lineColor = 'rgba(75, 85, 99, 0.5)'; this.t_ctx.strokeStyle = lineColor; this.t_ctx.font = '12px Inter'; this.t_ctx.fillStyle = lineColor; const start_x_m = Math.floor(this.camera_x_m - (this.traceCanvas.width / 2 / this.pixelsPerMeter)); const end_x_m = Math.ceil(this.camera_x_m + (this.traceCanvas.width / 2 / this.pixelsPerMeter)); for(let i = start_x_m; i <= end_x_m; i++) { const x = this.traceCanvas.width / 2 + (i - this.camera_x_m) * meterInPixels; this.t_ctx.beginPath(); this.t_ctx.lineWidth = (i % 5 === 0) ? 1.5 : 0.5; this.t_ctx.moveTo(x, 0); this.t_ctx.lineTo(x, this.traceCanvas.height); this.t_ctx.stroke(); if (i % 5 === 0 && i !== 0) this.t_ctx.fillText(`${i}m`, x + 5, 20); } }
@@ -94,6 +94,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const rewardChartCtx = document.getElementById('rewardChart').getContext('2d');
     // Assume lossChart canvas exists in HTML
     const lossChartCtx = document.getElementById('lossChart') ? document.getElementById('lossChart').getContext('2d') : null;
+    const seedInput = document.getElementById('seedInput');
+    const applySeedButton = document.getElementById('applySeedButton');
+    const domainRandToggle = document.getElementById('domainRandToggle');
 
     let workerAppMode = 'IDLE'; // IDLE, TRAINING, OBSERVING, PAUSED_TRAINING_SHOWING_POLICY, PAUSED_OBSERVING_STATIC
     let animationFrameId;
@@ -826,6 +829,19 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 showStatusMessage('Clipboard API not available or panel not found.', 'warning');
             }
+        });
+    }
+    if (applySeedButton) {
+        applySeedButton.addEventListener('click', () => {
+            const val = parseInt(seedInput.value, 10);
+            if (!Number.isFinite(val)) return showStatusMessage('Enter a valid integer seed', 'warning');
+            worker.postMessage({ type: 'set_seed', payload: { seed: val } });
+        });
+    }
+    if (domainRandToggle) {
+        domainRandToggle.addEventListener('change', (e) => {
+            worker.postMessage({ type: 'set_domain_randomization', payload: { enabled: e.target.checked } });
+            showStatusMessage(`Domain randomization ${e.target.checked ? 'enabled' : 'disabled'}`, 'info');
         });
     }
     

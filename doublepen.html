@@ -105,6 +105,17 @@
             <span id="memoryUsage" class="text-purple-400 font-bold">-</span>
           </div>
         </div>
+        <div class="grid grid-cols-2 gap-2 mt-3">
+          <div class="flex items-center space-x-2">
+            <label for="seedInput" class="text-xs text-gray-400">Seed:</label>
+            <input id="seedInput" type="number" class="bg-gray-700 text-gray-200 rounded px-2 py-1 w-full" placeholder="e.g. 12345" />
+            <button id="applySeedButton" class="bg-gray-600 hover:bg-gray-700 text-white font-semibold px-2 py-1 rounded text-xs">Apply</button>
+          </div>
+          <div class="flex items-center space-x-2">
+            <input id="domainRandToggle" type="checkbox" class="form-checkbox h-4 w-4 text-indigo-600" />
+            <label for="domainRandToggle" class="text-xs text-gray-400">Enable Domain Randomization</label>
+          </div>
+        </div>
       </div>
     </div>
 

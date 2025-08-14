@@ -104,6 +104,19 @@ class PendulumPhysics {
         this.lastTerminationReason = 'N/A'; // To store why an episode ended
     }
 
+    randomizeParams() {
+        // +-10% randomization on masses and lengths; gravity small jitter
+        const jitter = (base, pct) => base * (1 + (randUniform() * 2 - 1) * pct);
+        const p = this.params;
+        p.cart_m = jitter(p.cart_m, 0.1);
+        p.m1 = jitter(p.m1, 0.1);
+        p.m2 = jitter(p.m2, 0.1);
+        p.l1_m = jitter(p.l1_m, 0.1);
+        p.l2_m = jitter(p.l2_m, 0.1);
+        p.g = jitter(p.g, 0.02);
+        // Note: If WASM supported setters, we would push into engine; for now params are used only for rendering and rewards
+    }
+
     reset(resetWasm = true, randomize = false) {
         if (resetWasm) {
             this.wasmInstance.reset();
@@ -118,6 +131,9 @@ class PendulumPhysics {
             this.state.a2_v = rand(-0.2, 0.2);
             this.state.cart_x_m = rand(-0.1, 0.1);
             this.state.cart_x_v_m = rand(-0.2, 0.2);
+            if (domainRandomizationEnabled) {
+                this.randomizeParams();
+            }
         }
         this.currentStep = 0;
         this.lastTerminationReason = 'N/A';
@@ -772,6 +788,7 @@ let allowRenderBeforeTrainingPause = false; // To restore render state when resu
 let lastTrainingLosses = null; // To store results from agent.train()
 let lastSpsCheckTime = 0;
 let stepsSinceLastSpsCheck = 0;
+let domainRandomizationEnabled = false;
 // const WARMUP_STEPS = 1000; // This is superseded by AGENT_WARMUP_STEPS for agent logic
 const TRAIN_FREQUENCY = 1; // Train after every block of userSetStepsPerFrame steps if slider is >=1x
 const MAX_EPISODE_STEPS = 1000; // Match reference paper
@@ -1170,6 +1187,9 @@ self.onmessage = async function(e) {
                 setSeed(payload.seed);
                 self.postMessage({ type: 'status', payload: { status: 'Seed set', seed: rngSeed } });
             }
+            break;
+        case 'set_domain_randomization':
+            domainRandomizationEnabled = !!(payload && payload.enabled);
             break;
         case 'stop_training_and_observe':
             if (agent && agent.isReady) {
