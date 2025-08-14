@@ -97,6 +97,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const seedInput = document.getElementById('seedInput');
     const applySeedButton = document.getElementById('applySeedButton');
     const domainRandToggle = document.getElementById('domainRandToggle');
+    const evalEpisodesInput = document.getElementById('evalEpisodesInput');
+    const evalButton = document.getElementById('evalButton');
 
     let workerAppMode = 'IDLE'; // IDLE, TRAINING, OBSERVING, PAUSED_TRAINING_SHOWING_POLICY, PAUSED_OBSERVING_STATIC
     let animationFrameId;
@@ -369,6 +371,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 break; // Add break to prevent fall-through
             case 'gc_complete':
                 showStatusMessage(`Memory cleaned: ${payload.cleaned} tensors freed`, 'info');
+                break;
+            case 'evaluation_complete':
+                showStatusMessage(`Eval done: ${payload.episodes} eps, avg ${payload.avgReward.toFixed(2)}, best ${payload.bestReward.toFixed(2)}`, 'success');
                 break;
         }
     };
@@ -842,6 +847,16 @@ document.addEventListener('DOMContentLoaded', () => {
         domainRandToggle.addEventListener('change', (e) => {
             worker.postMessage({ type: 'set_domain_randomization', payload: { enabled: e.target.checked } });
             showStatusMessage(`Domain randomization ${e.target.checked ? 'enabled' : 'disabled'}`, 'info');
+        });
+    }
+    if (evalButton) {
+        evalButton.addEventListener('click', () => {
+            const n = parseInt(evalEpisodesInput.value, 10);
+            const episodes = Number.isFinite(n) && n > 0 ? n : 10;
+            worker.postMessage({ type: 'start_evaluation', payload: { episodes } });
+            showStatusMessage(`Starting evaluation (${episodes} episodes)`, 'info');
+            // Force visuals on during eval for clarity
+            isRendering = true; renderButton.textContent = 'Pause Visuals';
         });
     }
     
