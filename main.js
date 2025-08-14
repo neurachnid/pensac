@@ -330,7 +330,7 @@ document.addEventListener('DOMContentLoaded', () => {
             case 'state_saved':
                 localStorage.setItem('doublePendulumState', JSON.stringify(payload.agentState));
                 document.getElementById('loadStateButton').disabled = false;
-                showStatusMessage(`State saved (${(payload.serializedSize / 1024).toFixed(1)}KB)`, 'success');
+                showStatusMessage(`State saved (${(payload.serializedSize / 1024).toFixed(1)}KB)${payload.policySaved ? ' + policy' : ''}` , 'success');
                 break;
                 
             case 'state_loaded':
@@ -338,10 +338,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('episode-counter').textContent = payload.episode;
                 document.getElementById('total-steps').textContent = payload.totalSteps.toLocaleString();
                 document.getElementById('best-reward').textContent = payload.bestReward.toFixed(2);
-                showStatusMessage('State loaded successfully', 'success');
+                showStatusMessage(`State loaded successfully${payload.policyLoaded ? ' + policy' : ''}`, 'success');
                 updateDebugInfoPanel(); // Refresh with potentially loaded data
                 break;
-                
+            case 'status':
+                if (payload && payload.status) {
+                    showStatusMessage(payload.status, 'info');
+                }
+                break;
+            
             case 'state_save_error':
             case 'state_load_error':
                 showStatusMessage(payload.status + ': ' + payload.error, 'error');
@@ -456,6 +461,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (data.agentConfig) {
             content += `\n--- RL Agent Config ---\n`;
+            if (data.agentConfig.algorithm) content += `Algorithm: ${data.agentConfig.algorithm}\n`;
             if (data.agentConfig.alpha !== undefined) {
                 content += `Alpha (Entropy): ${data.agentConfig.alpha}\n`;
             }

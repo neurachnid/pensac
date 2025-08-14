@@ -111,7 +111,7 @@ class PendulumPhysics {
         this.state = this.wasmInstance.get_state_js();
         if (randomize) {
             // Small perturbations around downward position to aid exploration
-            const rand = (lo, hi) => lo + Math.random() * (hi - lo);
+            const rand = (lo, hi) => lo + randUniform() * (hi - lo);
             this.state.a1 = rand(-0.15, 0.15);
             this.state.a2 = rand(-0.15, 0.15);
             this.state.a1_v = rand(-0.2, 0.2);
@@ -340,7 +340,7 @@ class DDPGAgent {
             let chosenVal = meanVal;
 
             if (!deterministic) {
-                chosenVal += (Math.random() * 2 - 1) * 0.1;
+                chosenVal += (randUniform() * 2 - 1) * 0.1;
             }
 
             chosenVal = Math.max(-1, Math.min(1, chosenVal));
@@ -375,7 +375,7 @@ class DDPGAgent {
     sampleBatch() {
         const batch = {states: [], actions: [], rewards: [], nextStates: [], dones: []};
         for (let i = 0; i < this.batchSize; i++) {
-            const idx = Math.floor(Math.random() * this.replayBuffer.length);
+            const idx = Math.floor(randUniform() * this.replayBuffer.length);
             const e = this.replayBuffer[idx];
             batch.states.push(e.state);
             batch.actions.push([e.action]);
@@ -398,15 +398,22 @@ class DDPGAgent {
             const nextStates = tf.tensor(b.nextStates);
             const dones = tf.tensor(b.dones);
 
+            // Normalize states using current running statistics (do not update stats here)
+            const meanVec = tf.tensor(this.stateRunningMean);
+            const stdVec = tf.tensor(this.stateRunningVar.map(v => Math.sqrt(Math.max(v, 1e-6))))
+                .add(tf.scalar(1e-6));
+            const statesN = states.sub(meanVec).div(stdVec);
+            const nextStatesN = nextStates.sub(meanVec).div(stdVec);
+
             // --- Critic Training ---
             const criticVars = this.critic.trainableWeights.map(w => w.val);
             const criticGradsObj = tf.variableGrads(() => {
-                const nextActions = this.targetActor.predict(nextStates);
-                const qNext = this.targetCritic.predict([nextStates, nextActions]).reshape([this.batchSize]);
+                const nextActions = this.targetActor.predict(nextStatesN);
+                const qNext = this.targetCritic.predict([nextStatesN, nextActions]).reshape([this.batchSize]);
                 const y = rewards.reshape([this.batchSize]).add(
                     dones.reshape([this.batchSize]).mul(-1).add(1).mul(this.gamma).mul(qNext)
                 );
-                const q = this.critic.predict([states, actions]).reshape([this.batchSize]);
+                const q = this.critic.predict([statesN, actions]).reshape([this.batchSize]);
                 return tf.losses.meanSquaredError(y, q);
             }, criticVars);
             // Gradient clipping for stability
@@ -425,8 +432,8 @@ class DDPGAgent {
             // --- Actor Training ---
             const actorVars = this.actor.trainableWeights.map(w => w.val);
             const actorGradsObj = tf.variableGrads(() => {
-                const act = this.actor.predict(states);
-                const qVal = this.critic.predict([states, act]).reshape([this.batchSize]);
+                const act = this.actor.predict(statesN);
+                const qVal = this.critic.predict([statesN, act]).reshape([this.batchSize]);
                 return tf.neg(tf.mean(qVal));
             }, actorVars);
             const clippedActorGrads = {};
@@ -490,7 +497,7 @@ class ReplayBuffer {
     sample(batchSize) {
         const idxs = new Array(batchSize);
         for (let i = 0; i < batchSize; i++) {
-            idxs[i] = Math.floor(Math.random() * this.size);
+            idxs[i] = Math.floor(randUniform() * this.size);
         }
         const batch = { states: [], actions: [], rewards: [], nextStates: [], dones: [] };
         for (let i = 0; i < batchSize; i++) {
@@ -589,12 +596,7 @@ class TD3Agent {
     }
 
     gaussianNoise(std) {
-        // Box-Muller transform
-        const u1 = Math.random() + 1e-8;
-        const u2 = Math.random() + 1e-8;
-        const mag = Math.sqrt(-2.0 * Math.log(u1));
-        const z0 = mag * Math.cos(2 * Math.PI * u2);
-        return z0 * std;
+        return randNormal() * std;
     }
 
     explorationStdForStep(totalSteps) {
@@ -654,14 +656,23 @@ class TD3Agent {
             const nextStates = tf.tensor(b.nextStates);
             const dones = tf.tensor(b.dones);
 
+            // Normalize states
+            const meanVec = tf.tensor(this.stateRunningMean);
+            const stdVec = tf.tensor(this.stateRunningVar.map(v => Math.sqrt(Math.max(v, 1e-6))))
+                .add(tf.scalar(1e-6));
+            const statesN = states.sub(meanVec).div(stdVec);
+            const nextStatesN = nextStates.sub(meanVec).div(stdVec);
+
             // Target policy smoothing
-            const nextActionsMean = this.targetActor.predict(nextStates);
-            const noise = tf.randomNormal(nextActionsMean.shape, 0, this.targetPolicyNoise);
+            const nextActionsMean = this.targetActor.predict(nextStatesN);
+            // Use deterministic noise from our PRNG to improve reproducibility of control flow
+            const noiseVals = nextActionsMean.dataSync().map(() => randNormal() * this.targetPolicyNoise);
+            const noise = tf.tensor(noiseVals, nextActionsMean.shape);
             const clippedNoise = noise.clipByValue(-this.targetNoiseClip, this.targetNoiseClip);
             const nextActionsNoisy = nextActionsMean.add(clippedNoise).clipByValue(-1, 1);
 
-            const qNext1 = this.targetCritic1.predict([nextStates, nextActionsNoisy]).reshape([this.batchSize]);
-            const qNext2 = this.targetCritic2.predict([nextStates, nextActionsNoisy]).reshape([this.batchSize]);
+            const qNext1 = this.targetCritic1.predict([nextStatesN, nextActionsNoisy]).reshape([this.batchSize]);
+            const qNext2 = this.targetCritic2.predict([nextStatesN, nextActionsNoisy]).reshape([this.batchSize]);
             const qNextMin = tf.minimum(qNext1, qNext2);
             const y = rewards.reshape([this.batchSize]).add(
                 dones.reshape([this.batchSize]).mul(-1).add(1).mul(this.gamma).mul(qNextMin)
@@ -670,7 +681,7 @@ class TD3Agent {
             // Update Critic 1
             const vars1 = this.critic1.trainableWeights.map(w => w.val);
             const grads1 = tf.variableGrads(() => {
-                const q1 = this.critic1.predict([states, actions]).reshape([this.batchSize]);
+                const q1 = this.critic1.predict([statesN, actions]).reshape([this.batchSize]);
                 return tf.losses.meanSquaredError(y, q1);
             }, vars1);
             const clippedGrads1 = {};
@@ -684,7 +695,7 @@ class TD3Agent {
             // Update Critic 2
             const vars2 = this.critic2.trainableWeights.map(w => w.val);
             const grads2 = tf.variableGrads(() => {
-                const q2 = this.critic2.predict([states, actions]).reshape([this.batchSize]);
+                const q2 = this.critic2.predict([statesN, actions]).reshape([this.batchSize]);
                 return tf.losses.meanSquaredError(y, q2);
             }, vars2);
             const clippedGrads2 = {};
@@ -700,8 +711,8 @@ class TD3Agent {
             if (this.trainStepCount % this.policyDelay === 0) {
                 const actorVars = this.actor.trainableWeights.map(w => w.val);
                 const actorGrads = tf.variableGrads(() => {
-                    const act = this.actor.predict(states);
-                    const q = this.critic1.predict([states, act]).reshape([this.batchSize]);
+                    const act = this.actor.predict(statesN);
+                    const q = this.critic1.predict([statesN, act]).reshape([this.batchSize]);
                     return tf.neg(tf.mean(q));
                 }, actorVars);
                 const clippedActorGrads = {};
@@ -776,6 +787,31 @@ function getReplaySize() {
     return 0;
 }
 
+// --- Seedable PRNG for reproducibility of control flow randomness (not TF internal ops) ---
+let rngSeed = Date.now() >>> 0;
+let rngState = rngSeed;
+function setSeed(newSeed) {
+    rngSeed = (newSeed >>> 0);
+    rngState = rngSeed;
+}
+function randUniform() {
+    // xorshift32
+    rngState ^= rngState << 13;
+    rngState ^= rngState >>> 17;
+    rngState ^= rngState << 5;
+    // Convert to [0,1)
+    return ((rngState >>> 0) / 4294967296);
+}
+function randNormal() {
+    // Box-Muller using our PRNG
+    let u1 = randUniform();
+    let u2 = randUniform();
+    u1 = u1 < 1e-12 ? 1e-12 : u1;
+    const mag = Math.sqrt(-2.0 * Math.log(u1));
+    const z0 = mag * Math.cos(2 * Math.PI * u2);
+    return z0;
+}
+
 function validateState(state, context = 'unknown') {
     if (!Array.isArray(state)) {
         console.error(`Invalid state format in ${context}:`, state);
@@ -848,7 +884,7 @@ function simulationStep() {
 
     if (simulationMode === 'TRAINING' && !isObservingPolicyWhileTrainingPaused) { // True training step
         if (totalSteps < AGENT_WARMUP_STEPS) { // Use agent's warmup steps
-            actionToTake = (Math.random() * 2 - 1);
+            actionToTake = (randUniform() * 2 - 1);
         } else {
             actionToTake = agent.chooseAction(currentStateForAction, false, totalSteps); // Stochastic
         }
@@ -952,6 +988,7 @@ function simulationStep() {
                 trainFrequency: TRAIN_FREQUENCY,
                 stateSize: agent.stateSize,
                 actionSize: agent.actionSize,
+                algorithm: SELECTED_ALGO,
                 stateNormalizationMean: agent.stateRunningMean.map(v => parseFloat(v.toFixed(4))),
                 stateNormalizationVar: agent.stateRunningVar.map(v => parseFloat(v.toFixed(4)))
             },
@@ -1117,11 +1154,18 @@ self.onmessage = async function(e) {
                 warmupSteps: AGENT_WARMUP_STEPS,
                 trainFrequency: TRAIN_FREQUENCY,
                 stateSize: agent.stateSize,
-                actionSize: agent.actionSize
+                actionSize: agent.actionSize,
+                algorithm: SELECTED_ALGO
             } : null;
 
             self.postMessage({ type: 'training_started', payload: { status: 'Training Active', agentConfig: initialAgentConfig } });
             runSimulationLoop();
+            break;
+        case 'set_seed':
+            if (payload && typeof payload.seed === 'number') {
+                setSeed(payload.seed);
+                self.postMessage({ type: 'status', payload: { status: 'Seed set', seed: rngSeed } });
+            }
             break;
         case 'stop_training_and_observe':
             if (agent && agent.isReady) {
@@ -1217,13 +1261,35 @@ self.onmessage = async function(e) {
                         isPaused: isPaused, isObservingPolicyWhileTrainingPaused: isObservingPolicyWhileTrainingPaused,
                         timestamp: Date.now()
                     };
+
+                    // Save models to IndexedDB
+                    let policySaved = false;
+                    try {
+                        if (SELECTED_ALGO === 'TD3') {
+                            await agent.actor.save('indexeddb://dipc-actor');
+                            await agent.critic1.save('indexeddb://dipc-critic1');
+                            await agent.critic2.save('indexeddb://dipc-critic2');
+                            await agent.targetActor.save('indexeddb://dipc-target-actor');
+                            await agent.targetCritic1.save('indexeddb://dipc-target-critic1');
+                            await agent.targetCritic2.save('indexeddb://dipc-target-critic2');
+                        } else {
+                            await agent.actor.save('indexeddb://dipc-ddpg-actor');
+                            await agent.critic.save('indexeddb://dipc-ddpg-critic');
+                            await agent.targetActor.save('indexeddb://dipc-ddpg-target-actor');
+                            await agent.targetCritic.save('indexeddb://dipc-ddpg-target-critic');
+                        }
+                        policySaved = true;
+                    } catch (e) {
+                        policySaved = false;
+                    }
                     
                     self.postMessage({ 
                         type: 'state_saved', 
                         payload: { 
                             status: 'State Saved Successfully',
                             agentState,
-                            serializedSize: JSON.stringify(agentState).length
+                            serializedSize: JSON.stringify(agentState).length,
+                            policySaved
                         } 
                     });
                 } catch (error) {
@@ -1257,6 +1323,41 @@ self.onmessage = async function(e) {
                         // TODO: Need a method in Wasm to set its state if loading. For now, it resets.
                         physics.currentStep = payload.agentState.physics.currentStep;
                     }
+
+                    // Try loading models from IndexedDB
+                    let policyLoaded = false;
+                    try {
+                        if (SELECTED_ALGO === 'TD3') {
+                            const actorLoaded = await tf.loadLayersModel('indexeddb://dipc-actor');
+                            const critic1Loaded = await tf.loadLayersModel('indexeddb://dipc-critic1');
+                            const critic2Loaded = await tf.loadLayersModel('indexeddb://dipc-critic2');
+                            const targetActorLoaded = await tf.loadLayersModel('indexeddb://dipc-target-actor');
+                            const targetCritic1Loaded = await tf.loadLayersModel('indexeddb://dipc-target-critic1');
+                            const targetCritic2Loaded = await tf.loadLayersModel('indexeddb://dipc-target-critic2');
+                            agent.actor.setWeights(actorLoaded.getWeights());
+                            agent.critic1.setWeights(critic1Loaded.getWeights());
+                            agent.critic2.setWeights(critic2Loaded.getWeights());
+                            agent.targetActor.setWeights(targetActorLoaded.getWeights());
+                            agent.targetCritic1.setWeights(targetCritic1Loaded.getWeights());
+                            agent.targetCritic2.setWeights(targetCritic2Loaded.getWeights());
+                            actorLoaded.dispose(); critic1Loaded.dispose(); critic2Loaded.dispose();
+                            targetActorLoaded.dispose(); targetCritic1Loaded.dispose(); targetCritic2Loaded.dispose();
+                        } else {
+                            const actorLoaded = await tf.loadLayersModel('indexeddb://dipc-ddpg-actor');
+                            const criticLoaded = await tf.loadLayersModel('indexeddb://dipc-ddpg-critic');
+                            const targetActorLoaded = await tf.loadLayersModel('indexeddb://dipc-ddpg-target-actor');
+                            const targetCriticLoaded = await tf.loadLayersModel('indexeddb://dipc-ddpg-target-critic');
+                            agent.actor.setWeights(actorLoaded.getWeights());
+                            agent.critic.setWeights(criticLoaded.getWeights());
+                            agent.targetActor.setWeights(targetActorLoaded.getWeights());
+                            agent.targetCritic.setWeights(targetCriticLoaded.getWeights());
+                            actorLoaded.dispose(); criticLoaded.dispose(); targetActorLoaded.dispose(); targetCriticLoaded.dispose();
+                        }
+                        policyLoaded = true;
+                    } catch (e) {
+                        policyLoaded = false;
+                    }
+                    
                     // Restore simulation mode if relevant
                     // simulationMode = payload.agentState.simulationMode || 'IDLE';
                     // isPaused = payload.agentState.isPaused || false;
@@ -1272,7 +1373,8 @@ self.onmessage = async function(e) {
                             status: 'State Loaded Successfully',
                             episode,
                             totalSteps,
-                            bestReward
+                            bestReward,
+                            policyLoaded
                         } 
                     });
                 } catch (error) {
