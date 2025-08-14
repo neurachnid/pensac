@@ -27,7 +27,7 @@ async function configureTensorFlowJS() {
     // Initialize Wasm module built with wasm-bindgen
     await initWasm(new URL('./pkg_physics/physics_engine_bg.wasm', self.location).href);
 
-    // Configure TensorFlow.js to use the WebAssembly backend if available
+    // Configure TensorFlow.js     // Configure TensorFlow.js to use the WebAssembly backend if available
     try {
         if (tf && tf.wasm && tf.wasm.setWasmPaths) {
             tf.wasm.setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/');
@@ -36,14 +36,22 @@ async function configureTensorFlowJS() {
         await tf.ready();
     } catch (err) {
         console.warn('WASM backend failed, falling back to WebGL:', err);
-        await tf.setBackend('webgl');
+        try {
+            await tf.setBackend('webgl');
+            await tf.ready();
+        } catch (err2) {
+            console.warn('WebGL backend failed, falling back to CPU:', err2);
+            await tf.setBackend('cpu');
+            await tf.ready();
+        }
     }
 
-    // Configure memory management
-    tf.env().set('WEBGL_PACK', true);
-    tf.env().set('WEBGL_FORCE_F16_TEXTURES', true);
-    tf.env().set('WEBGL_RENDER_FLOAT32_CAPABLE', true);
-    
+    // Configure memory management for WebGL backend only
+    if (tf.getBackend && tf.getBackend() === 'webgl') {
+        tf.env().set('WEBGL_PACK', true);
+        tf.env().set('WEBGL_FORCE_F16_TEXTURES', true);
+        tf.env().set('WEBGL_RENDER_FLOAT32_CAPABLE', true);
+    }
     console.log('TensorFlow.js optimized backend:', tf.getBackend());
     console.log('Physics Wasm module loaded.');
     console.log('Memory info:', tf.memory());
