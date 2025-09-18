@@ -58,7 +58,7 @@ class PendulumRenderer {
         const minBobRadiusPx = 4; // Minimum pixel radius for bobs
         const visual_r1 = Math.max(minBobRadiusPx, Math.pow(this.params.m1, 1/3) * visualMassScaleFactor * this.pixelsPerMeter);
         const visual_r2 = Math.max(minBobRadiusPx, Math.pow(this.params.m2, 1/3) * visualMassScaleFactor * this.pixelsPerMeter);
-        this.p_ctx.beginPath(); this.p_ctx.arc(x1, y1, visual_r1, 0, 2 * Math.PI); const isTraining = document.getElementById('trainButton').textContent === 'Stop Training'; this.p_ctx.fillStyle = isTraining ? '#3b82f6' : '#60a5fa'; this.p_ctx.fill(); 
+        this.p_ctx.beginPath(); this.p_ctx.arc(x1, y1, visual_r1, 0, 2 * Math.PI); const isTraining = (typeof workerAppMode !== 'undefined') && (workerAppMode === 'TRAINING' || workerAppMode === 'PAUSED_TRAINING_SHOWING_POLICY'); this.p_ctx.fillStyle = isTraining ? '#3b82f6' : '#60a5fa'; this.p_ctx.fill(); 
         this.p_ctx.beginPath(); this.p_ctx.arc(x2, y2, visual_r2, 0, 2 * Math.PI); this.p_ctx.fillStyle = isTraining ? '#ef4444' : '#f87171'; this.p_ctx.fill(); 
     }
     drawGrid() { this.t_ctx.clearRect(0, 0, this.traceCanvas.width, this.traceCanvas.height); this.t_ctx.fillStyle = '#1f2937'; this.t_ctx.fillRect(0, 0, this.traceCanvas.width, this.traceCanvas.height); const meterInPixels = 1 * this.pixelsPerMeter; const lineColor = 'rgba(75, 85, 99, 0.5)'; this.t_ctx.strokeStyle = lineColor; this.t_ctx.font = '12px Inter'; this.t_ctx.fillStyle = lineColor; const start_x_m = Math.floor(this.camera_x_m - (this.traceCanvas.width / 2 / this.pixelsPerMeter)); const end_x_m = Math.ceil(this.camera_x_m + (this.traceCanvas.width / 2 / this.pixelsPerMeter)); for(let i = start_x_m; i <= end_x_m; i++) { const x = this.traceCanvas.width / 2 + (i - this.camera_x_m) * meterInPixels; this.t_ctx.beginPath(); this.t_ctx.lineWidth = (i % 5 === 0) ? 1.5 : 0.5; this.t_ctx.moveTo(x, 0); this.t_ctx.lineTo(x, this.traceCanvas.height); this.t_ctx.stroke(); if (i % 5 === 0 && i !== 0) this.t_ctx.fillText(`${i}m`, x + 5, 20); } }
@@ -94,6 +94,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const rewardChartCtx = document.getElementById('rewardChart').getContext('2d');
     // Assume lossChart canvas exists in HTML
     const lossChartCtx = document.getElementById('lossChart') ? document.getElementById('lossChart').getContext('2d') : null;
+    const seedInput = document.getElementById('seedInput');
+    const applySeedButton = document.getElementById('applySeedButton');
+    const domainRandToggle = document.getElementById('domainRandToggle');
+    const evalEpisodesInput = document.getElementById('evalEpisodesInput');
+    const evalButton = document.getElementById('evalButton');
 
     let workerAppMode = 'IDLE'; // IDLE, TRAINING, OBSERVING, PAUSED_TRAINING_SHOWING_POLICY, PAUSED_OBSERVING_STATIC
     let animationFrameId;
@@ -224,8 +229,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('currentMode').textContent = 'Training Active';
                 document.getElementById('currentMode').className = 'text-green-400 font-bold';
                 document.getElementById('agentState').textContent = 'Learning';
-                trainButton.textContent = 'Stop Training';
-                trainButton.textContent = 'Pause Training'; // User request
+                trainButton.textContent = 'Pause Training';
                 pauseResumeButton.disabled = false; // This is now resetPendulumButton
                 speedSlider.disabled = false;
                 trainButton.disabled = false;
@@ -331,7 +335,7 @@ document.addEventListener('DOMContentLoaded', () => {
             case 'state_saved':
                 localStorage.setItem('doublePendulumState', JSON.stringify(payload.agentState));
                 document.getElementById('loadStateButton').disabled = false;
-                showStatusMessage(`State saved (${(payload.serializedSize / 1024).toFixed(1)}KB)`, 'success');
+                showStatusMessage(`State saved (${(payload.serializedSize / 1024).toFixed(1)}KB)${payload.policySaved ? ' + policy' : ''}` , 'success');
                 break;
                 
             case 'state_loaded':
@@ -339,10 +343,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('episode-counter').textContent = payload.episode;
                 document.getElementById('total-steps').textContent = payload.totalSteps.toLocaleString();
                 document.getElementById('best-reward').textContent = payload.bestReward.toFixed(2);
-                showStatusMessage('State loaded successfully', 'success');
+                showStatusMessage(`State loaded successfully${payload.policyLoaded ? ' + policy' : ''}`, 'success');
                 updateDebugInfoPanel(); // Refresh with potentially loaded data
                 break;
-                
+            case 'status':
+                if (payload && payload.status) {
+                    showStatusMessage(payload.status, 'info');
+                }
+                break;
+            
             case 'state_save_error':
             case 'state_load_error':
                 showStatusMessage(payload.status + ': ' + payload.error, 'error');
@@ -362,6 +371,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 break; // Add break to prevent fall-through
             case 'gc_complete':
                 showStatusMessage(`Memory cleaned: ${payload.cleaned} tensors freed`, 'info');
+                break;
+            case 'evaluation_complete':
+                showStatusMessage(`Eval done: ${payload.episodes} eps, avg ${payload.avgReward.toFixed(2)}, best ${payload.bestReward.toFixed(2)}`, 'success');
                 break;
         }
     };
@@ -411,12 +423,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const data = latestDebugSnapshot;
         let content = `--- Simulation Status ---\n`; // Use the centrally stored snapshot
         content += `Mode: ${data.mode || 'IDLE'}`;
-        if (data.mode === 'PAUSED' && data.pausedMode) {
-            content += ` (was ${data.pausedMode})`;
-        }
         content += `\n`;
 
-        if ((data.mode === 'TRAINING' || (data.mode === 'PAUSED' && data.pausedMode === 'TRAINING')) && data.agentConfig) {
+        if ((data.mode === 'TRAINING' || data.mode === 'PAUSED_TRAINING_SHOWING_POLICY') && data.agentConfig) {
             let statusText = 'N/A';
             if (data.totalSteps !== undefined && data.agentConfig.warmupSteps !== undefined) {
                 if (data.totalSteps < data.agentConfig.warmupSteps) {
@@ -426,11 +435,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
             content += `Status: ${statusText}\n`;
-        } else if (data.mode === 'OBSERVING' || (data.mode === 'PAUSED' && data.pausedMode === 'OBSERVING')) {
+        } else if (data.mode === 'OBSERVING' || data.mode === 'PAUSED_OBSERVING_STATIC') {
             const statusText = data.mode === 'OBSERVING' ? 'Observing' : 'Observation Paused';
             content += `Status: ${statusText}\n`;
         } else {
-             content += `Status: N/A\n`;
+            content += `Status: N/A\n`;
         }
         if (data.terminationReason && data.terminationReason !== 'Running') content += `Last Termination: ${data.terminationReason}\n`;
         content += `Episode: ${data.episode || 0}\n`;
@@ -441,7 +450,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         content += `\n--- Rewards ---\n`;
         content += `Current Ep Reward: ${(data.totalReward || 0).toFixed(2)}\n`;
-        content += `Best Ep Reward: ${(data.bestReward || -Infinity).toFixed(2)}\n`;
+        const bestRewardVal = Number.isFinite(data.bestReward) ? data.bestReward : 0;
+        content += `Best Ep Reward: ${bestRewardVal.toFixed(2)}\n`;
         content += `Avg Reward (last 10): ${(data.avgReward || 0).toFixed(2)}\n`;
 
         // Use latestDebugSnapshot.trainingLosses directly as it's updated from worker
@@ -459,6 +469,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (data.agentConfig) {
             content += `\n--- RL Agent Config ---\n`;
+            if (data.agentConfig.algorithm) content += `Algorithm: ${data.agentConfig.algorithm}\n`;
             if (data.agentConfig.alpha !== undefined) {
                 content += `Alpha (Entropy): ${data.agentConfig.alpha}\n`;
             }
@@ -825,6 +836,38 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     }
+    if (applySeedButton) {
+        applySeedButton.addEventListener('click', () => {
+            const val = parseInt(seedInput.value, 10);
+            if (!Number.isFinite(val)) return showStatusMessage('Enter a valid integer seed', 'warning');
+            worker.postMessage({ type: 'set_seed', payload: { seed: val } });
+        });
+    }
+    if (domainRandToggle) {
+        domainRandToggle.addEventListener('change', (e) => {
+            worker.postMessage({ type: 'set_domain_randomization', payload: { enabled: e.target.checked } });
+            showStatusMessage(`Domain randomization ${e.target.checked ? 'enabled' : 'disabled'}`, 'info');
+        });
+    }
+    if (evalButton) {
+        evalButton.addEventListener('click', () => {
+            const n = parseInt(evalEpisodesInput.value, 10);
+            const episodes = Number.isFinite(n) && n > 0 ? n : 10;
+            worker.postMessage({ type: 'start_evaluation', payload: { episodes } });
+            showStatusMessage(`Starting evaluation (${episodes} episodes)`, 'info');
+            // Force visuals on during eval for clarity
+            isRendering = true; renderButton.textContent = 'Pause Visuals';
+        });
+    }
+    
+    // Handle explicit worker_error messages for better diagnostics
+    worker.addEventListener('message', (e) => {
+        if (e.data && e.data.type === 'worker_error') {
+            const msg = e.data.payload && e.data.payload.message ? e.data.payload.message : 'Unknown worker error';
+            console.error('Worker reported error:', msg);
+            showStatusMessage('Worker error: ' + msg, 'error');
+        }
+    });
 
     trainButton.addEventListener('click', () => {
         if (workerAppMode === 'TRAINING') {

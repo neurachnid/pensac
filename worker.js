@@ -27,7 +27,7 @@ async function configureTensorFlowJS() {
     // Initialize Wasm module built with wasm-bindgen
     await initWasm(new URL('./pkg_physics/physics_engine_bg.wasm', self.location).href);
 
-    // Configure TensorFlow.js to use the WebAssembly backend if available
+    // Configure TensorFlow.js     // Configure TensorFlow.js to use the WebAssembly backend if available
     try {
         if (tf && tf.wasm && tf.wasm.setWasmPaths) {
             tf.wasm.setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/');
@@ -36,14 +36,22 @@ async function configureTensorFlowJS() {
         await tf.ready();
     } catch (err) {
         console.warn('WASM backend failed, falling back to WebGL:', err);
-        await tf.setBackend('webgl');
+        try {
+            await tf.setBackend('webgl');
+            await tf.ready();
+        } catch (err2) {
+            console.warn('WebGL backend failed, falling back to CPU:', err2);
+            await tf.setBackend('cpu');
+            await tf.ready();
+        }
     }
 
-    // Configure memory management
-    tf.env().set('WEBGL_PACK', true);
-    tf.env().set('WEBGL_FORCE_F16_TEXTURES', true);
-    tf.env().set('WEBGL_RENDER_FLOAT32_CAPABLE', true);
-    
+    // Configure memory management for WebGL backend only
+    if (tf.getBackend && tf.getBackend() === 'webgl') {
+        tf.env().set('WEBGL_PACK', true);
+        tf.env().set('WEBGL_FORCE_F16_TEXTURES', true);
+        tf.env().set('WEBGL_RENDER_FLOAT32_CAPABLE', true);
+    }
     console.log('TensorFlow.js optimized backend:', tf.getBackend());
     console.log('Physics Wasm module loaded.');
     console.log('Memory info:', tf.memory());
@@ -96,9 +104,37 @@ class PendulumPhysics {
         this.lastTerminationReason = 'N/A'; // To store why an episode ended
     }
 
-    reset() {
-        this.wasmInstance.reset();
+    randomizeParams() {
+        // +-10% randomization on masses and lengths; gravity small jitter
+        const jitter = (base, pct) => base * (1 + (randUniform() * 2 - 1) * pct);
+        const p = this.params;
+        p.cart_m = jitter(p.cart_m, 0.1);
+        p.m1 = jitter(p.m1, 0.1);
+        p.m2 = jitter(p.m2, 0.1);
+        p.l1_m = jitter(p.l1_m, 0.1);
+        p.l2_m = jitter(p.l2_m, 0.1);
+        p.g = jitter(p.g, 0.02);
+        // Note: If WASM supported setters, we would push into engine; for now params are used only for rendering and rewards
+    }
+
+    reset(resetWasm = true, randomize = false) {
+        if (resetWasm) {
+            this.wasmInstance.reset();
+        }
         this.state = this.wasmInstance.get_state_js();
+        if (randomize) {
+            // Small perturbations around downward position to aid exploration
+            const rand = (lo, hi) => lo + randUniform() * (hi - lo);
+            this.state.a1 = rand(-0.15, 0.15);
+            this.state.a2 = rand(-0.15, 0.15);
+            this.state.a1_v = rand(-0.2, 0.2);
+            this.state.a2_v = rand(-0.2, 0.2);
+            this.state.cart_x_m = rand(-0.1, 0.1);
+            this.state.cart_x_v_m = rand(-0.2, 0.2);
+            if (domainRandomizationEnabled) {
+                this.randomizeParams();
+            }
+        }
         this.currentStep = 0;
         this.lastTerminationReason = 'N/A';
         return this.getStateArray();
@@ -166,41 +202,42 @@ class PendulumPhysics {
     }
 
     calculateReward(action) {
-        const { a1, a2, cart_x_m } = this.state;
+        const { a1, a2, cart_x_m, cart_x_v_m, a1_v, a2_v } = this.state;
 
         // Check for valid numbers
-        const varsToCheck = [a1, a2, cart_x_m, action];
+        const varsToCheck = [a1, a2, cart_x_m, cart_x_v_m, a1_v, a2_v, action];
         if (varsToCheck.some(v => !isFinite(v) || isNaN(v))) {
             console.warn('NaN/Inf in reward inputs', varsToCheck);
             return -10;
         }
 
-        // Convert internal angles (0 = down) to paper convention (0 = up)
-        // then wrap to [-pi, pi] to avoid large penalties
+        // Convert internal angles (0 = down) to paper convention (0 = up) and wrap to [-pi, pi]
         const wrap = x => ((x + Math.PI) % (2 * Math.PI)) - Math.PI;
         const theta1 = wrap(a1 - Math.PI);
         const theta2 = wrap(a2 - Math.PI);
 
-        // Reward weights from the reference paper
-        const w0 = 0.1;
-        const w1 = 5.0;
-        const w2 = 5.0;
-        const w3 = 1.0;
-        const w4 = 0.05;
-        const Vp = 100.0;
+        // Enhanced shaping: include cart velocity and angular velocities
+        const w0 = 0.1;   // overall scale
+        const w1 = 6.0;   // theta1
+        const w2 = 6.0;   // theta2
+        const w3 = 1.2;   // cart position
+        const w4 = 0.05;  // effort
+        const wv = 0.02;  // cart velocity
+        const wa = 0.01;  // angular velocities
+        const Vp = 150.0; // out-of-bounds penalty
 
         const penalty = w1 * theta1 * theta1 +
                         w2 * theta2 * theta2 +
                         w3 * cart_x_m * cart_x_m +
+                        wv * cart_x_v_m * cart_x_v_m +
+                        wa * (a1_v * a1_v + a2_v * a2_v) +
                         w4 * (action * action);
 
         const F = Math.abs(cart_x_m) > this.trackLimit ? 1.0 : 0.0;
-
         const r = -w0 * penalty - Vp * F;
 
         this.lastRewardComponents = { penalty: -w0 * penalty, outOfBounds: -Vp * F };
-        this.effectiveRewardWeights = { w0, w1, w2, w3, w4, Vp };
-
+        this.effectiveRewardWeights = { w0, w1, w2, w3, w4, wv, wa, Vp };
         return r;
     }
 
@@ -232,6 +269,9 @@ class ScaleLayer extends tf.layers.Layer {
     }
 }
 
+// Prevent duplicate registration across re-inits
+let scaleLayerRegistered = false;
+
 // --- DDPG Agent Implementation ---
 class DDPGAgent {
     constructor() {
@@ -260,7 +300,7 @@ class DDPGAgent {
     }
 
     async init() {
-        tf.serialization.registerClass(ScaleLayer);
+        if (!scaleLayerRegistered) { tf.serialization.registerClass(ScaleLayer); scaleLayerRegistered = true; }
 
         this.actor = this.buildActor();
         this.critic = this.buildCritic();
@@ -319,7 +359,7 @@ class DDPGAgent {
             let chosenVal = meanVal;
 
             if (!deterministic) {
-                chosenVal += (Math.random() * 2 - 1) * 0.1;
+                chosenVal += (randUniform() * 2 - 1) * 0.1;
             }
 
             chosenVal = Math.max(-1, Math.min(1, chosenVal));
@@ -354,7 +394,7 @@ class DDPGAgent {
     sampleBatch() {
         const batch = {states: [], actions: [], rewards: [], nextStates: [], dones: []};
         for (let i = 0; i < this.batchSize; i++) {
-            const idx = Math.floor(Math.random() * this.replayBuffer.length);
+            const idx = Math.floor(randUniform() * this.replayBuffer.length);
             const e = this.replayBuffer[idx];
             batch.states.push(e.state);
             batch.actions.push([e.action]);
@@ -377,21 +417,33 @@ class DDPGAgent {
             const nextStates = tf.tensor(b.nextStates);
             const dones = tf.tensor(b.dones);
 
+            // Normalize states using current running statistics (do not update stats here)
+            const meanVec = tf.tensor(this.stateRunningMean);
+            const stdVec = tf.tensor(this.stateRunningVar.map(v => Math.sqrt(Math.max(v, 1e-6))))
+                .add(tf.scalar(1e-6));
+            const statesN = states.sub(meanVec).div(stdVec);
+            const nextStatesN = nextStates.sub(meanVec).div(stdVec);
+
             // --- Critic Training ---
             const criticVars = this.critic.trainableWeights.map(w => w.val);
             const criticGradsObj = tf.variableGrads(() => {
-                const nextActions = this.targetActor.predict(nextStates);
-                const qNext = this.targetCritic.predict([nextStates, nextActions]).reshape([this.batchSize]);
+                const nextActions = this.targetActor.predict(nextStatesN);
+                const qNext = this.targetCritic.predict([nextStatesN, nextActions]).reshape([this.batchSize]);
                 const y = rewards.reshape([this.batchSize]).add(
                     dones.reshape([this.batchSize]).mul(-1).add(1).mul(this.gamma).mul(qNext)
                 );
-                const q = this.critic.predict([states, actions]).reshape([this.batchSize]);
+                const q = this.critic.predict([statesN, actions]).reshape([this.batchSize]);
                 return tf.losses.meanSquaredError(y, q);
             }, criticVars);
-            this.criticOptimizer.applyGradients(criticGradsObj.grads);
+            // Gradient clipping for stability
+            const clippedCriticGrads = {};
+            for (const [k, g] of Object.entries(criticGradsObj.grads)) {
+                clippedCriticGrads[k] = tf.clipByValue(g, -1, 1);
+            }
+            this.criticOptimizer.applyGradients(clippedCriticGrads);
 
             let criticGradNorm = 0;
-            for (const g of Object.values(criticGradsObj.grads)) {
+            for (const g of Object.values(clippedCriticGrads)) {
                 criticGradNorm += g.norm().dataSync()[0];
             }
             const criticLoss = criticGradsObj.value.dataSync()[0];
@@ -399,14 +451,18 @@ class DDPGAgent {
             // --- Actor Training ---
             const actorVars = this.actor.trainableWeights.map(w => w.val);
             const actorGradsObj = tf.variableGrads(() => {
-                const act = this.actor.predict(states);
-                const qVal = this.critic.predict([states, act]).reshape([this.batchSize]);
+                const act = this.actor.predict(statesN);
+                const qVal = this.critic.predict([statesN, act]).reshape([this.batchSize]);
                 return tf.neg(tf.mean(qVal));
             }, actorVars);
-            this.actorOptimizer.applyGradients(actorGradsObj.grads);
+            const clippedActorGrads = {};
+            for (const [k, g] of Object.entries(actorGradsObj.grads)) {
+                clippedActorGrads[k] = tf.clipByValue(g, -1, 1);
+            }
+            this.actorOptimizer.applyGradients(clippedActorGrads);
 
             let actorGradNorm = 0;
-            for (const g of Object.values(actorGradsObj.grads)) {
+            for (const g of Object.values(clippedActorGrads)) {
                 actorGradNorm += g.norm().dataSync()[0];
             }
             const actorLoss = actorGradsObj.value.dataSync()[0];
@@ -436,8 +492,279 @@ class DDPGAgent {
 
 }
 
+// --- Ring Replay Buffer for performance ---
+class ReplayBuffer {
+    constructor(capacity) {
+        this.capacity = capacity;
+        this.states = new Array(capacity);
+        this.actions = new Array(capacity);
+        this.rewards = new Array(capacity);
+        this.nextStates = new Array(capacity);
+        this.dones = new Array(capacity);
+        this.size = 0;
+        this.head = 0;
+    }
+    push(state, action, reward, nextState, done) {
+        this.states[this.head] = state;
+        this.actions[this.head] = action;
+        this.rewards[this.head] = reward;
+        this.nextStates[this.head] = nextState;
+        this.dones[this.head] = done ? 1 : 0;
+        this.head = (this.head + 1) % this.capacity;
+        if (this.size < this.capacity) this.size++;
+    }
+    sample(batchSize) {
+        const idxs = new Array(batchSize);
+        for (let i = 0; i < batchSize; i++) {
+            idxs[i] = Math.floor(randUniform() * this.size);
+        }
+        const batch = { states: [], actions: [], rewards: [], nextStates: [], dones: [] };
+        for (let i = 0; i < batchSize; i++) {
+            const j = idxs[i];
+            batch.states.push(this.states[j]);
+            batch.actions.push([this.actions[j]]);
+            batch.rewards.push([this.rewards[j]]);
+            batch.nextStates.push(this.nextStates[j]);
+            batch.dones.push([this.dones[j]]);
+        }
+        return batch;
+    }
+    get length() { return this.size; }
+}
+
+// --- TD3 Agent (Twin Delayed DDPG) ---
+class TD3Agent {
+    constructor() {
+        this.stateSize = 8;
+        this.actionSize = 1;
+        this.actionBounds = 1.0;
+
+        this.actorLr = 1e-4;
+        this.criticLr = 1e-3;
+        this.gamma = 0.99;
+        this.tau = 0.005;
+        this.batchSize = 256;
+        this.bufferSize = 1000000;
+        this.policyDelay = 2; // Delayed policy updates
+        this.targetPolicyNoise = 0.2; // For target smoothing (in action space units)
+        this.targetNoiseClip = 0.5;   // Clip noise
+
+        this.warmupSteps = AGENT_WARMUP_STEPS;
+        this.replay = new ReplayBuffer(this.bufferSize);
+        this.trainStepCount = 0;
+
+        this.stateRunningMean = new Array(this.stateSize).fill(0);
+        this.stateRunningVar = new Array(this.stateSize).fill(1);
+        this.stateCount = 0;
+
+        this.lastDiagnostics = {};
+        this.isReady = false;
+        this.init();
+    }
+
+    async init() {
+        if (!scaleLayerRegistered) { tf.serialization.registerClass(ScaleLayer); scaleLayerRegistered = true; }
+        this.actor = this.buildActor();
+        this.critic1 = this.buildCritic();
+        this.critic2 = this.buildCritic();
+        this.targetActor = this.buildActor();
+        this.targetCritic1 = this.buildCritic();
+        this.targetCritic2 = this.buildCritic();
+
+        this.actorOptimizer = tf.train.adam(this.actorLr);
+        this.criticOptimizer1 = tf.train.adam(this.criticLr);
+        this.criticOptimizer2 = tf.train.adam(this.criticLr);
+
+        this.updateTargetNetworks(1.0);
+        this.isReady = true;
+    }
+
+    buildActor() {
+        const input = tf.input({ shape: [this.stateSize] });
+        let x = tf.layers.dense({ units: 400, activation: 'relu' }).apply(input);
+        x = tf.layers.dense({ units: 300, activation: 'relu' }).apply(x);
+        const out = tf.layers.dense({ units: this.actionSize, activation: 'tanh' }).apply(x);
+        const scaled = new ScaleLayer({ scaleFactor: this.actionBounds }).apply(out);
+        return tf.model({ inputs: input, outputs: scaled });
+    }
+
+    buildCritic() {
+        const stateInput = tf.input({ shape: [this.stateSize] });
+        const actionInput = tf.input({ shape: [this.actionSize] });
+        let s = tf.layers.dense({ units: 400, activation: 'relu' }).apply(stateInput);
+        const concat = tf.layers.concatenate().apply([s, actionInput]);
+        let x = tf.layers.dense({ units: 300, activation: 'relu' }).apply(concat);
+        const out = tf.layers.dense({ units: 1 }).apply(x);
+        return tf.model({ inputs: [stateInput, actionInput], outputs: out });
+    }
+
+    normalizeState(state) {
+        const normalized = [];
+        this.stateCount++;
+        const count = Math.min(this.stateCount, 10000);
+        for (let i = 0; i < state.length; i++) {
+            const val = Math.max(-1000, Math.min(1000, state[i]));
+            const delta = val - this.stateRunningMean[i];
+            this.stateRunningMean[i] += delta / count;
+            const delta2 = val - this.stateRunningMean[i];
+            this.stateRunningVar[i] = (this.stateRunningVar[i] * (count - 1) + delta * delta2) / count;
+            const std = Math.sqrt(Math.max(this.stateRunningVar[i], 1e-6));
+            normalized.push((val - this.stateRunningMean[i]) / std);
+        }
+        return normalized;
+    }
+
+    gaussianNoise(std) {
+        return randNormal() * std;
+    }
+
+    explorationStdForStep(totalSteps) {
+        const start = 0.2;
+        const end = 0.05;
+        const decay = 20000;
+        const t = Math.min(1.0, totalSteps / decay);
+        return start * (1 - t) + end * t;
+    }
+
+    chooseAction(state, deterministic = false, totalSteps = 0) {
+        return tf.tidy(() => {
+            const normState = this.normalizeState(state);
+            const s = tf.tensor([normState]);
+            const actorOut = this.actor.predict(s).flatten();
+            let meanVal = actorOut.dataSync()[0];
+            let chosenVal = meanVal;
+            if (!deterministic) {
+                const std = this.explorationStdForStep(totalSteps);
+                chosenVal += this.gaussianNoise(std);
+            }
+            chosenVal = Math.max(-1, Math.min(1, chosenVal));
+
+            // Diagnostics
+            const q1 = this.critic1.predict([s, tf.tensor([[chosenVal]])]).reshape([1]).dataSync()[0];
+            const q2 = this.critic2.predict([s, tf.tensor([[chosenVal]])]).reshape([1]).dataSync()[0];
+            this.lastDiagnostics = { actorMean: meanVal, actorLogStd: null, criticQ1: q1, criticQ2: q2 };
+            return chosenVal;
+        });
+    }
+
+    remember(state, action, reward, nextState, done) {
+        this.replay.push(state, action, reward, nextState, done);
+    }
+
+    updateTargetNetworks(tau) {
+        const updateTarget = (target, source) => {
+            const tw = target.getWeights();
+            const sw = source.getWeights();
+            const newW = sw.map((w, i) => tf.tidy(() => w.mul(tau).add(tw[i].mul(1 - tau))));
+            target.setWeights(newW);
+            tf.dispose(newW);
+        };
+        updateTarget(this.targetActor, this.actor);
+        updateTarget(this.targetCritic1, this.critic1);
+        updateTarget(this.targetCritic2, this.critic2);
+    }
+
+    train() {
+        if (this.replay.length < this.batchSize) return {};
+        this.trainStepCount++;
+        return tf.tidy(() => {
+            const b = this.replay.sample(this.batchSize);
+            const states = tf.tensor(b.states);
+            const actions = tf.tensor(b.actions);
+            const rewards = tf.tensor(b.rewards);
+            const nextStates = tf.tensor(b.nextStates);
+            const dones = tf.tensor(b.dones);
+
+            // Normalize states
+            const meanVec = tf.tensor(this.stateRunningMean);
+            const stdVec = tf.tensor(this.stateRunningVar.map(v => Math.sqrt(Math.max(v, 1e-6))))
+                .add(tf.scalar(1e-6));
+            const statesN = states.sub(meanVec).div(stdVec);
+            const nextStatesN = nextStates.sub(meanVec).div(stdVec);
+
+            // Target policy smoothing
+            const nextActionsMean = this.targetActor.predict(nextStatesN);
+            // Use deterministic noise from our PRNG to improve reproducibility of control flow without GPU->CPU sync
+            const noiseSize = nextActionsMean.size || (nextActionsMean.shape ? nextActionsMean.shape.reduce((a,b)=>a*b,1) : 1);
+            const noiseVals = Array.from({ length: noiseSize }, () => randNormal() * this.targetPolicyNoise);
+            const noise = tf.tensor(noiseVals, nextActionsMean.shape);
+            const clippedNoise = noise.clipByValue(-this.targetNoiseClip, this.targetNoiseClip);
+            const nextActionsNoisy = nextActionsMean.add(clippedNoise).clipByValue(-1, 1);
+
+            const qNext1 = this.targetCritic1.predict([nextStatesN, nextActionsNoisy]).reshape([this.batchSize]);
+            const qNext2 = this.targetCritic2.predict([nextStatesN, nextActionsNoisy]).reshape([this.batchSize]);
+            const qNextMin = tf.minimum(qNext1, qNext2);
+            const y = rewards.reshape([this.batchSize]).add(
+                dones.reshape([this.batchSize]).mul(-1).add(1).mul(this.gamma).mul(qNextMin)
+            );
+
+            // Update Critic 1
+            const vars1 = this.critic1.trainableWeights.map(w => w.val);
+            const grads1 = tf.variableGrads(() => {
+                const q1 = this.critic1.predict([statesN, actions]).reshape([this.batchSize]);
+                return tf.losses.meanSquaredError(y, q1);
+            }, vars1);
+            const clippedGrads1 = {};
+            for (const [k, g] of Object.entries(grads1.grads)) {
+                clippedGrads1[k] = tf.clipByValue(g, -1, 1);
+            }
+            this.criticOptimizer1.applyGradients(clippedGrads1);
+            const criticLoss1 = grads1.value.dataSync()[0];
+            let criticGradNorm1 = 0; for (const g of Object.values(clippedGrads1)) { criticGradNorm1 += g.norm().dataSync()[0]; }
+
+            // Update Critic 2
+            const vars2 = this.critic2.trainableWeights.map(w => w.val);
+            const grads2 = tf.variableGrads(() => {
+                const q2 = this.critic2.predict([statesN, actions]).reshape([this.batchSize]);
+                return tf.losses.meanSquaredError(y, q2);
+            }, vars2);
+            const clippedGrads2 = {};
+            for (const [k, g] of Object.entries(grads2.grads)) {
+                clippedGrads2[k] = tf.clipByValue(g, -1, 1);
+            }
+            this.criticOptimizer2.applyGradients(clippedGrads2);
+            const criticLoss2 = grads2.value.dataSync()[0];
+            let criticGradNorm2 = 0; for (const g of Object.values(clippedGrads2)) { criticGradNorm2 += g.norm().dataSync()[0]; }
+
+            let actorLoss = null;
+            let actorGradNorm = null;
+            if (this.trainStepCount % this.policyDelay === 0) {
+                const actorVars = this.actor.trainableWeights.map(w => w.val);
+                const actorGrads = tf.variableGrads(() => {
+                    const act = this.actor.predict(statesN);
+                    const q = this.critic1.predict([statesN, act]).reshape([this.batchSize]);
+                    return tf.neg(tf.mean(q));
+                }, actorVars);
+                const clippedActorGrads = {};
+                for (const [k, g] of Object.entries(actorGrads.grads)) {
+                    clippedActorGrads[k] = tf.clipByValue(g, -1, 1);
+                }
+                this.actorOptimizer.applyGradients(clippedActorGrads);
+                actorLoss = actorGrads.value.dataSync()[0];
+                actorGradNorm = 0; for (const g of Object.values(clippedActorGrads)) { actorGradNorm += g.norm().dataSync()[0]; }
+
+                // Soft update targets
+                this.updateTargetNetworks(this.tau);
+            }
+
+            // Return scalar values for logging
+            return {
+                criticLoss: (criticLoss1 + criticLoss2) / 2,
+                criticLoss1,
+                criticLoss2,
+                criticGradNorm1,
+                criticGradNorm2,
+                actorLoss,
+                actorGradNorm
+            };
+        });
+    }
+
+    getPolicyDiagnostics() { return this.lastDiagnostics || {}; }
+}
 
 // --- Worker Globals ---
+const SELECTED_ALGO = 'TD3';
 let allowRender = true; // main-thread can disable to save bandwidth during training
 let simulationMode = 'IDLE'; // 'IDLE', 'TRAINING', 'OBSERVING'
 let isPaused = false; // General pause flag, true if simulationMode was TRAINING or OBSERVING and pause_simulation was called
@@ -461,13 +788,58 @@ let allowRenderBeforeTrainingPause = false; // To restore render state when resu
 let lastTrainingLosses = null; // To store results from agent.train()
 let lastSpsCheckTime = 0;
 let stepsSinceLastSpsCheck = 0;
+let domainRandomizationEnabled = false;
+// Evaluation mode
+let isEvaluating = false;
+let evalEpisodesRemaining = 0;
+let evalEpisodesTotal = 0;
+let evalSumReward = 0;
+let evalBestReward = -Infinity;
+let evalPrevMode = 'IDLE';
+let evalPrevAllowRender = true;
+let evalEpisodeReward = 0;
 // const WARMUP_STEPS = 1000; // This is superseded by AGENT_WARMUP_STEPS for agent logic
 const TRAIN_FREQUENCY = 1; // Train after every block of userSetStepsPerFrame steps if slider is >=1x
 const MAX_EPISODE_STEPS = 1000; // Match reference paper
-const AGENT_WARMUP_STEPS = 1000; // Should match agent.warmupSteps
+const AGENT_WARMUP_STEPS = 5000; // Increased warmup for TD3 stability
+const POLICY_DELAY = 2;
+const TARGET_POLICY_NOISE = 0.2;
+const TARGET_NOISE_CLIP = 0.5;
 // DEBUGGING HELPERS - Add comprehensive NaN detection
 function isValidNumber(value) {
     return typeof value === 'number' && isFinite(value) && !isNaN(value);
+}
+
+function getReplaySize() {
+    if (!agent) return 0;
+    if (agent.replay && typeof agent.replay.length === 'number') return agent.replay.length;
+    if (agent.replayBuffer && Array.isArray(agent.replayBuffer)) return agent.replayBuffer.length;
+    return 0;
+}
+
+// --- Seedable PRNG for reproducibility of control flow randomness (not TF internal ops) ---
+let rngSeed = Date.now() >>> 0;
+let rngState = rngSeed;
+function setSeed(newSeed) {
+    rngSeed = (newSeed >>> 0);
+    rngState = rngSeed;
+}
+function randUniform() {
+    // xorshift32
+    rngState ^= rngState << 13;
+    rngState ^= rngState >>> 17;
+    rngState ^= rngState << 5;
+    // Convert to [0,1)
+    return ((rngState >>> 0) / 4294967296);
+}
+function randNormal() {
+    // Box-Muller using our PRNG
+    let u1 = randUniform();
+    let u2 = randUniform();
+    u1 = u1 < 1e-12 ? 1e-12 : u1;
+    const mag = Math.sqrt(-2.0 * Math.log(u1));
+    const z0 = mag * Math.cos(2 * Math.PI * u2);
+    return z0;
 }
 
 function validateState(state, context = 'unknown') {
@@ -494,10 +866,14 @@ function validateReward(reward, context = 'unknown') {
 }
 
 function init() {
-    agent = new DDPGAgent();
+    if (SELECTED_ALGO === 'TD3') {
+        agent = new TD3Agent();
+    } else {
+        agent = new DDPGAgent();
+    }
     physics = new PendulumPhysics();
     physics.maxSteps = MAX_EPISODE_STEPS; // Update physics
-    state = physics.reset();
+    state = physics.reset(false);
     simulationMode = 'IDLE';
     isPaused = false;
     isObservingPolicyWhileTrainingPaused = false;
@@ -505,7 +881,7 @@ function init() {
     // Validate initial state
     if (!validateState(state, 'init')) {
         console.error('Invalid initial state, resetting...');
-        state = physics.reset();
+        state = physics.reset(false);
     }
     
     latestAction = 0;
@@ -517,7 +893,7 @@ function init() {
     bestReward = -Infinity;
     lastSpsCheckTime = performance.now();
     stepsSinceLastSpsCheck = 0;
-    console.log('Initializing DDPG agent for double pendulum...');
+    console.log(`Initializing ${SELECTED_ALGO} agent for double pendulum...`);
 }
 
 function simulationStep() {
@@ -529,21 +905,21 @@ function simulationStep() {
     // Validate current state
     if (!validateState(currentState, 'simulationStep-current')) {
         console.warn('Invalid current state detected, resetting episode');
-        state = physics.reset();
+        state = physics.reset(true, simulationMode === 'TRAINING');
         return;
     }
     
     let actionToTake;
-    const isDeterministicAction = simulationMode === 'OBSERVING' || isObservingPolicyWhileTrainingPaused;
+    const isDeterministicAction = simulationMode === 'OBSERVING' || isObservingPolicyWhileTrainingPaused || isEvaluating;
 
-    if (simulationMode === 'TRAINING' && !isObservingPolicyWhileTrainingPaused) { // True training step
+    if (simulationMode === 'TRAINING' && !isObservingPolicyWhileTrainingPaused && !isEvaluating) { // True training step
         if (totalSteps < AGENT_WARMUP_STEPS) { // Use agent's warmup steps
-            actionToTake = (Math.random() * 2 - 1);
+            actionToTake = (randUniform() * 2 - 1);
         } else {
-            actionToTake = agent.chooseAction(currentStateForAction, false); // Stochastic
+            actionToTake = agent.chooseAction(currentStateForAction, false, totalSteps); // Stochastic
         }
-    } else { // OBSERVING mode or observing policy while training is "paused"
-        actionToTake = agent.chooseAction(currentStateForAction, isDeterministicAction); // Deterministic
+    } else { // OBSERVING mode, observing policy while training is "paused", or Evaluating
+        actionToTake = agent.chooseAction(currentStateForAction, isDeterministicAction, totalSteps); // Deterministic when not true training
     }
     latestAction = actionToTake; // Store the chosen action (normalized)
 
@@ -555,28 +931,39 @@ function simulationStep() {
     lastPolicyDiagnostics = agent.getPolicyDiagnostics(); // Get diagnostics after action is chosen
     
     const scaledAction = actionToTake * physics.actionMax;
-    const { next_state, reward, done } = physics.step(scaledAction, simulationMode); // Pass the global simulationMode
+    // In evaluation, apply training-like termination criteria
+    const modeForStep = isEvaluating ? 'TRAINING' : simulationMode;
+    const { next_state, reward, done } = physics.step(scaledAction, modeForStep);
 
     // Comprehensive validation
     if (!validateState(next_state, 'simulationStep-next')) {
         console.warn('Invalid next state, resetting episode');
-        state = physics.reset();
+        state = physics.reset(true, simulationMode === 'TRAINING');
         return;
     }
 
     if (!validateReward(reward, 'simulationStep')) {
         console.warn('Invalid reward detected, using fallback reward');
         const fallbackReward = -1.0; // Small negative reward for invalid state
-        totalReward += fallbackReward;
-        if (!isValidNumber(totalReward)) {
-            totalReward = -100.0; // Reset to reasonable value
+        if (isEvaluating) {
+            evalEpisodeReward += fallbackReward;
+            if (!isValidNumber(evalEpisodeReward)) evalEpisodeReward = -100.0;
+        } else {
+            totalReward += fallbackReward;
+            if (!isValidNumber(totalReward)) {
+                totalReward = -100.0; // Reset to reasonable value
+            }
         }
     } else {
-        totalReward += reward;
+        if (isEvaluating) {
+            evalEpisodeReward += reward;
+        } else {
+            totalReward += reward;
+        }
     }
 
     // Store experience and increment totalSteps only if in actual TRAINING mode (not observing paused policy)
-    if (simulationMode === 'TRAINING' && !isObservingPolicyWhileTrainingPaused) {
+    if (simulationMode === 'TRAINING' && !isObservingPolicyWhileTrainingPaused && !isEvaluating) {
         totalSteps++; // Only count steps that contribute to training
         if (validateState(currentStateForAction, 'experience-current') && 
             validateState(next_state, 'experience-next') && 
@@ -595,74 +982,94 @@ function simulationStep() {
 
     if (done) {
         // Validate episode reward before logging
-        if (!isValidNumber(totalReward)) {
-            console.warn('Invalid total reward at episode end:', totalReward);
-            totalReward = -100.0; // Use reasonable fallback
-        }
-        
-        episodeRewards.push(totalReward);
-        
-        if (totalReward > bestReward) {
-            bestReward = totalReward;
-        }
-        
-        const avgReward = episodeRewards.length >= 10 ? 
-            episodeRewards.slice(-10).reduce((a, b) => a + b) / 10 : totalReward;
-        
-        // Validate avgReward
-        const validAvgReward = isValidNumber(avgReward) ? avgReward : totalReward;
-        
-        self.postMessage({
-            type: 'episode_done',
-            payload: {
-                episode,
-                totalReward,
-                bestReward,
-                avgReward: validAvgReward,
-                totalSteps: simulationMode === 'TRAINING' ? totalSteps : undefined,
-                episodeSteps: physics.currentStep,
-                mode: isObservingPolicyWhileTrainingPaused ? 'TRAINING_PAUSED_OBSERVING' : simulationMode,
-                bufferSize: agent.replayBuffer.length
-            },
-            // Add more detailed snapshot data
-            trainingLosses: lastTrainingLosses, 
-            lastStepRewardComponents: physics.getRewardComponents(),
-            // Send the action and diagnostics for the step that ended the episode
-            lastAction: latestAction,
-            policyDiagnostics: lastPolicyDiagnostics,
-            terminationReason: physics.getTerminationReason(),
-            agentConfig: {
-                actorLr: agent.actorLr,
-                criticLr: agent.criticLr,
-                batchSize: agent.batchSize,
-                tau: agent.tau,
-                gamma: agent.gamma,
-                bufferSize: agent.bufferSize,
-                warmupSteps: AGENT_WARMUP_STEPS,
-                trainFrequency: TRAIN_FREQUENCY,
-                stateSize: agent.stateSize,
-                actionSize: agent.actionSize,
-                stateNormalizationMean: agent.stateRunningMean.map(v => parseFloat(v.toFixed(4))),
-                stateNormalizationVar: agent.stateRunningVar.map(v => parseFloat(v.toFixed(4)))
-            },
-            physicsRewardConfig: physics.getEffectiveRewardWeights(),
-            currentSpeed: currentSimStepsPerFrame
-        });
-        
-        episode++;
-        totalReward = 0;
-        state = physics.reset();
-        
-        // Validate reset state
-        if (!validateState(state, 'episode-reset')) {
-            console.error('Invalid state after reset, forcing new reset');
-            physics = new PendulumPhysics(); // Create new physics instance
-            state = physics.reset();
-        }
-        
-        // Reset action for the new episode (will be chosen at start of next simulationStep)
-        if ((simulationMode !== 'TRAINING' || isObservingPolicyWhileTrainingPaused) || totalSteps < AGENT_WARMUP_STEPS) {
-            latestAction = 0;
+        if (isEvaluating) {
+            // eval episode end accounting
+            if (!isValidNumber(evalEpisodeReward)) evalEpisodeReward = -100.0;
+            evalSumReward += evalEpisodeReward;
+            if (evalEpisodeReward > evalBestReward) evalBestReward = evalEpisodeReward;
+            evalEpisodesRemaining--;
+            evalEpisodeReward = 0;
+            // Reset env (no randomize for evaluation)
+            state = physics.reset(true, false);
+            if (evalEpisodesRemaining <= 0) {
+                const avg = evalEpisodesTotal > 0 ? evalSumReward / evalEpisodesTotal : 0;
+                self.postMessage({ type: 'evaluation_complete', payload: { episodes: evalEpisodesTotal, avgReward: avg, bestReward: evalBestReward } });
+                // Restore previous state
+                isEvaluating = false;
+                simulationMode = evalPrevMode;
+                allowRender = evalPrevAllowRender;
+            }
+        } else {
+            if (!isValidNumber(totalReward)) {
+                console.warn('Invalid total reward at episode end:', totalReward);
+                totalReward = -100.0; // Use reasonable fallback
+            }
+            
+            episodeRewards.push(totalReward);
+            
+            if (totalReward > bestReward) {
+                bestReward = totalReward;
+            }
+            
+            const avgReward = episodeRewards.length >= 10 ? 
+                episodeRewards.slice(-10).reduce((a, b) => a + b) / 10 : totalReward;
+            
+            // Validate avgReward
+            const validAvgReward = isValidNumber(avgReward) ? avgReward : totalReward;
+            
+            self.postMessage({
+                type: 'episode_done',
+                payload: {
+                    episode,
+                    totalReward,
+                    bestReward,
+                    avgReward: validAvgReward,
+                    totalSteps: simulationMode === 'TRAINING' ? totalSteps : undefined,
+                    episodeSteps: physics.currentStep,
+                    mode: isObservingPolicyWhileTrainingPaused ? 'TRAINING_PAUSED_OBSERVING' : simulationMode,
+                    bufferSize: getReplaySize()
+                },
+                // Add more detailed snapshot data
+                trainingLosses: lastTrainingLosses, 
+                lastStepRewardComponents: physics.getRewardComponents(),
+                // Send the action and diagnostics for the step that ended the episode
+                lastAction: latestAction,
+                policyDiagnostics: lastPolicyDiagnostics,
+                terminationReason: physics.getTerminationReason(),
+                agentConfig: {
+                    actorLr: agent.actorLr,
+                    criticLr: agent.criticLr,
+                    batchSize: agent.batchSize,
+                    tau: agent.tau,
+                    gamma: agent.gamma,
+                    bufferSize: agent.bufferSize,
+                    warmupSteps: AGENT_WARMUP_STEPS,
+                    trainFrequency: TRAIN_FREQUENCY,
+                    stateSize: agent.stateSize,
+                    actionSize: agent.actionSize,
+                    algorithm: SELECTED_ALGO,
+                    stateNormalizationMean: agent.stateRunningMean.map(v => parseFloat(v.toFixed(4))),
+                    stateNormalizationVar: agent.stateRunningVar.map(v => parseFloat(v.toFixed(4)))
+                },
+                physicsRewardConfig: physics.getEffectiveRewardWeights(),
+                currentSpeed: currentSimStepsPerFrame
+            });
+            
+            episode++;
+            totalReward = 0;
+            state = physics.reset(true, simulationMode === 'TRAINING');
+            
+            // Validate reset state
+            if (!validateState(state, 'episode-reset')) {
+                console.error('Invalid state after reset, forcing new reset');
+                physics = new PendulumPhysics(); // Create new physics instance
+                state = physics.reset(true, simulationMode === 'TRAINING');
+            }
+            
+            // Reset action for the new episode (will be chosen at start of next simulationStep)
+            if ((simulationMode !== 'TRAINING' || isObservingPolicyWhileTrainingPaused) || totalSteps < AGENT_WARMUP_STEPS) {
+                latestAction = 0;
+            }
         }
         
         // Memory management
@@ -717,7 +1124,7 @@ function runSimulationLoop() {
     if (simulationMode === 'TRAINING' && !isObservingPolicyWhileTrainingPaused && // Only train if truly training
         totalSteps > AGENT_WARMUP_STEPS && // Use agent's warmup steps
         (totalSteps - lastTrainStep) >= TRAIN_FREQUENCY && 
-        agent.replayBuffer.length >= agent.batchSize) {
+        getReplaySize() >= agent.batchSize) {
         
         try {
             const losses = agent.train();
@@ -807,18 +1214,43 @@ self.onmessage = async function(e) {
                 warmupSteps: AGENT_WARMUP_STEPS,
                 trainFrequency: TRAIN_FREQUENCY,
                 stateSize: agent.stateSize,
-                actionSize: agent.actionSize
+                actionSize: agent.actionSize,
+                algorithm: SELECTED_ALGO
             } : null;
 
             self.postMessage({ type: 'training_started', payload: { status: 'Training Active', agentConfig: initialAgentConfig } });
             runSimulationLoop();
+            break;
+        case 'start_evaluation':
+            // Configure to evaluate deterministically for N episodes
+            await tfReadyPromise;
+            if (!agent) init();
+            isEvaluating = true;
+            evalEpisodesRemaining = (payload && payload.episodes) ? Math.max(1, Math.floor(payload.episodes)) : 10;
+            evalEpisodesTotal = evalEpisodesRemaining;
+            evalSumReward = 0; evalBestReward = -Infinity; evalEpisodeReward = 0;
+            evalPrevMode = simulationMode; evalPrevAllowRender = allowRender;
+            isPaused = false; isObservingPolicyWhileTrainingPaused = false;
+            allowRender = true; // watch
+            // Put loop in running state; underlying termination uses training criteria for evaluation
+            if (simulationMode === 'IDLE') simulationMode = 'OBSERVING';
+            runSimulationLoop();
+            break;
+        case 'set_seed':
+            if (payload && typeof payload.seed === 'number') {
+                setSeed(payload.seed);
+                self.postMessage({ type: 'status', payload: { status: 'Seed set', seed: rngSeed } });
+            }
+            break;
+        case 'set_domain_randomization':
+            domainRandomizationEnabled = !!(payload && payload.enabled);
             break;
         case 'stop_training_and_observe':
             if (agent && agent.isReady) {
                 simulationMode = 'OBSERVING';
                 isPaused = false;
                 isObservingPolicyWhileTrainingPaused = false;
-                state = physics.reset(); // Reset physics state for observation
+                state = physics.reset(true, false); // Reset physics state for observation (no randomize)
                 latestAction = 0;        // Reset last action as state changed
                 allowRender = true;
                 lastSpsCheckTime = performance.now(); // Reset SPS counters
@@ -873,7 +1305,7 @@ self.onmessage = async function(e) {
             break;
         case 'reset_pendulum_physics_state_only':
             if (physics) {
-                physics.reset();
+                physics.reset(true, false);
                 state = physics.getStateArray();
                 latestAction = 0;
                 // Send an immediate render update with the new state
@@ -907,13 +1339,35 @@ self.onmessage = async function(e) {
                         isPaused: isPaused, isObservingPolicyWhileTrainingPaused: isObservingPolicyWhileTrainingPaused,
                         timestamp: Date.now()
                     };
+
+                    // Save models to IndexedDB
+                    let policySaved = false;
+                    try {
+                        if (SELECTED_ALGO === 'TD3') {
+                            await agent.actor.save('indexeddb://dipc-actor');
+                            await agent.critic1.save('indexeddb://dipc-critic1');
+                            await agent.critic2.save('indexeddb://dipc-critic2');
+                            await agent.targetActor.save('indexeddb://dipc-target-actor');
+                            await agent.targetCritic1.save('indexeddb://dipc-target-critic1');
+                            await agent.targetCritic2.save('indexeddb://dipc-target-critic2');
+                        } else {
+                            await agent.actor.save('indexeddb://dipc-ddpg-actor');
+                            await agent.critic.save('indexeddb://dipc-ddpg-critic');
+                            await agent.targetActor.save('indexeddb://dipc-ddpg-target-actor');
+                            await agent.targetCritic.save('indexeddb://dipc-ddpg-target-critic');
+                        }
+                        policySaved = true;
+                    } catch (e) {
+                        policySaved = false;
+                    }
                     
                     self.postMessage({ 
                         type: 'state_saved', 
                         payload: { 
                             status: 'State Saved Successfully',
                             agentState,
-                            serializedSize: JSON.stringify(agentState).length
+                            serializedSize: JSON.stringify(agentState).length,
+                            policySaved
                         } 
                     });
                 } catch (error) {
@@ -947,6 +1401,41 @@ self.onmessage = async function(e) {
                         // TODO: Need a method in Wasm to set its state if loading. For now, it resets.
                         physics.currentStep = payload.agentState.physics.currentStep;
                     }
+
+                    // Try loading models from IndexedDB
+                    let policyLoaded = false;
+                    try {
+                        if (SELECTED_ALGO === 'TD3') {
+                            const actorLoaded = await tf.loadLayersModel('indexeddb://dipc-actor');
+                            const critic1Loaded = await tf.loadLayersModel('indexeddb://dipc-critic1');
+                            const critic2Loaded = await tf.loadLayersModel('indexeddb://dipc-critic2');
+                            const targetActorLoaded = await tf.loadLayersModel('indexeddb://dipc-target-actor');
+                            const targetCritic1Loaded = await tf.loadLayersModel('indexeddb://dipc-target-critic1');
+                            const targetCritic2Loaded = await tf.loadLayersModel('indexeddb://dipc-target-critic2');
+                            agent.actor.setWeights(actorLoaded.getWeights());
+                            agent.critic1.setWeights(critic1Loaded.getWeights());
+                            agent.critic2.setWeights(critic2Loaded.getWeights());
+                            agent.targetActor.setWeights(targetActorLoaded.getWeights());
+                            agent.targetCritic1.setWeights(targetCritic1Loaded.getWeights());
+                            agent.targetCritic2.setWeights(targetCritic2Loaded.getWeights());
+                            actorLoaded.dispose(); critic1Loaded.dispose(); critic2Loaded.dispose();
+                            targetActorLoaded.dispose(); targetCritic1Loaded.dispose(); targetCritic2Loaded.dispose();
+                        } else {
+                            const actorLoaded = await tf.loadLayersModel('indexeddb://dipc-ddpg-actor');
+                            const criticLoaded = await tf.loadLayersModel('indexeddb://dipc-ddpg-critic');
+                            const targetActorLoaded = await tf.loadLayersModel('indexeddb://dipc-ddpg-target-actor');
+                            const targetCriticLoaded = await tf.loadLayersModel('indexeddb://dipc-ddpg-target-critic');
+                            agent.actor.setWeights(actorLoaded.getWeights());
+                            agent.critic.setWeights(criticLoaded.getWeights());
+                            agent.targetActor.setWeights(targetActorLoaded.getWeights());
+                            agent.targetCritic.setWeights(targetCriticLoaded.getWeights());
+                            actorLoaded.dispose(); criticLoaded.dispose(); targetActorLoaded.dispose(); targetCriticLoaded.dispose();
+                        }
+                        policyLoaded = true;
+                    } catch (e) {
+                        policyLoaded = false;
+                    }
+                    
                     // Restore simulation mode if relevant
                     // simulationMode = payload.agentState.simulationMode || 'IDLE';
                     // isPaused = payload.agentState.isPaused || false;
@@ -962,7 +1451,8 @@ self.onmessage = async function(e) {
                             status: 'State Loaded Successfully',
                             episode,
                             totalSteps,
-                            bestReward
+                            bestReward,
+                            policyLoaded
                         } 
                     });
                 } catch (error) {
@@ -981,7 +1471,7 @@ self.onmessage = async function(e) {
                     payload: { 
                         tensors: memInfo.numTensors,
                         bytes: memInfo.numBytes,
-                        bufferSize: agent ? agent.replayBuffer.length : 0
+                        bufferSize: getReplaySize()
                     } 
                 });
             }
